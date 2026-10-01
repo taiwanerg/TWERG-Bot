@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # 這是一個非常簡易的地震模擬模組，由於我不熟悉這方面的算法，如果覺得有可以改進的地方請丟 PR 
 
 # 匯入 dyfi_map 的共用模組
-from cogs.dyfi_map import TOPO_LOCAL, load_topo, CDI_MAP, cdi_style
+from module.dyfi_map import TOPO_LOCAL, load_topo, CDI_MAP, cdi_style
 
 def distance(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -311,8 +311,8 @@ def render_emulator_map_pil(mag, depth, lon, lat, fault_type):
         fake_cx = (min(penghu_x_list) + max(penghu_x_list)) / 2
         fake_cy = (min(penghu_y_list) + max(penghu_y_list)) / 2
         
-        real_cx = min_x + (119.5664 - WGS_MIN_LON) / (WGS_MAX_LON - WGS_MIN_LON) * (max_x - min_x)
-        my = merc_y(23.5711)
+        real_cx = min_x + (119.508 - WGS_MIN_LON) / (WGS_MAX_LON - WGS_MIN_LON) * (max_x - min_x)
+        my = merc_y(23.479)
         my_max = merc_y(WGS_MAX_LAT)
         my_min = merc_y(WGS_MIN_LAT)
         real_cy = min_y + (my_max - my) / (my_max - my_min) * (max_y - min_y)
@@ -561,7 +561,11 @@ def render_emulator_map_pil(mag, depth, lon, lat, fault_type):
         lum = 0.299 * r + 0.587 * g + 0.114 * b
         text_col = 'white' if lum < 128 else '#1a1a1a'
         
-        draw.text((px, py - 1), grade_str, fill=text_col, font=font_intensity, anchor="mm")
+        # 以實際字形外框置中，避免不同字數（例如 5-/5+）或字型度量造成偏移。
+        text_left, text_top, text_right, text_bottom = draw.textbbox((0, 0), grade_str, font=font_intensity)
+        text_x = px - (text_left + text_right) / 2
+        text_y = py - (text_top + text_bottom) / 2
+        draw.text((text_x, text_y), grade_str, fill=text_col, font=font_intensity)
 
     # 繪製震央
     epx, epy = lonlat_to_img(lon, lat)

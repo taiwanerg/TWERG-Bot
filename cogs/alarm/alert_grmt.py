@@ -100,7 +100,7 @@ class GRMTAutoPushCog(commands.Cog):
         embed.set_image(url=record['img_url'])
         embed.set_footer(text="中央研究院地球科學研究所 • 圖片內為 UTC 時間")
         
-        message_content = "🌍 GRMT 自動報告"
+        message_content = "GRMT 自動報告"
         
         for guild_id, settings in guild_settings.items():
             if not settings.get("grmt_monitor_enabled", False):

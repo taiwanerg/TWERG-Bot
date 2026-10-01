@@ -27,7 +27,6 @@ class HelpView(discord.ui.View):
         embed_owner.add_field(name="/guilds", value="🤖 顯示機器人加入的伺服器列表與活躍狀態", inline=False)
         embed_owner.add_field(name="/leave", value="🚪 強制退出指定的伺服器", inline=False)
         embed_owner.add_field(name="/broadcast", value="📢 對所有開啟自動推送的伺服器發送廣播", inline=False)
-        embed_owner.add_field(name="/push", value="🚨 強制推送最新的一筆地震或體感報告", inline=False)
         embed_owner.add_field(name="/shutdown", value="🛑 關閉 BOT", inline=False)
         embed_owner.add_field(name="/restart", value="🔄 重新啟動機器人", inline=False)
 

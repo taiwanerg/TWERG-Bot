@@ -13,10 +13,10 @@ import time
 
 # 嘗試載入地圖產生器，若失敗則設為 None
 try:
-    from cogs.dyfi_map import render_map
+    from module.dyfi_map import render_map
 except ImportError:
     render_map = None
-from cogs.discord_dyfi import fetch_discord_reports
+from module.discord_dyfi import fetch_discord_reports
 
 class DyfiReportCog(commands.Cog):
     def __init__(self, bot):

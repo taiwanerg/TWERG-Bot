@@ -44,7 +44,7 @@ class MyBot(commands.Bot):
     def __init__(self):
         # 宣告 Intents
         intents = discord.Intents.default()
-        # 必須開啟這項權限，傳統指令 (如 *push) 才能運作
+        # 保留訊息內容權限，供需要讀取訊息的功能使用。
         intents.message_content = True
         
         # 將傳統指令前綴設定為 *
@@ -64,10 +64,10 @@ class MyBot(commands.Bot):
                 except Exception as e:
                     logging.error(f"❌ 載入模組 {extension_name} 時發生錯誤: {e}")
                     
-        # 自動載入 cogs/alarm/ 資料夾下的所有 .py 檔案
+        # 自動載入 cogs/alarm/ 下所有與背景自動推送有關的 Cog。
         if os.path.exists('./cogs/alarm'):
             for filename in os.listdir('./cogs/alarm'):
-                if filename.endswith('.py') and not filename.startswith(('_', '.')):
+                if filename.startswith('alert_') and filename.endswith('.py'):
                     extension_name = f'cogs.alarm.{filename[:-3]}'
                     try:
                         await self.load_extension(extension_name)

@@ -7,3 +7,6 @@ guild_settings.json
 /.vscode
 /module/__pycache__
 /cogs/alarm/__pycache__
+/data/earthquake_reports.db
+/data/youtube_viewers.db
+/data/.matplotlib/

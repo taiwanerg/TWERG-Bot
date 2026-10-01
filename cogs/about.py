@@ -6,7 +6,7 @@ from discord import app_commands
 class AboutCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.version = "1.5"
+        self.version = "1.6"
         self.ready_printed = False
 
     @commands.Cog.listener()
@@ -50,7 +50,7 @@ class AboutCog(commands.Cog):
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="地牛記錄小組", emoji="<:Logo_white:1503678586845003828>", url="https://www.twerg.org", style=discord.ButtonStyle.link))
         view.add_item(discord.ui.Button(label="Discord 伺服器",url="https://discord.gg/7sacMKp", style=discord.ButtonStyle.link))
-        view.add_item(discord.ui.Button(label="BOT 原始碼", emoji="<:Github:1503678487234613301>", url="https://github.com/Nanporo/TWERG-Bot/", style=discord.ButtonStyle.link))
+        view.add_item(discord.ui.Button(label="BOT 原始碼", emoji="<:Github:1503678487234613301>", url="https://github.com/taiwanerg/TWERG-Bot", style=discord.ButtonStyle.link))
         
         await interaction.response.send_message(content=message_content, embed=embed, view=view)
 

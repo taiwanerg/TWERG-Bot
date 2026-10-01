@@ -9,8 +9,8 @@ import io
 import os
 import time
 import logging
-from cogs.dyfi_map import render_map
-from cogs.discord_dyfi import fetch_discord_reports
+from module.dyfi_map import render_map
+from module.discord_dyfi import fetch_discord_reports
 
 # 這是當使用者輸入 /dyfi 指令時會查詢 CWA 地震資料，並整合官方體感回報與 Discord 使用者回報的模組
 # 產生地震資訊、回報統計與地圖的 Embed 訊息

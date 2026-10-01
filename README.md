@@ -20,12 +20,18 @@ Its main purpose is to automatically push [TWERG "Did You Feel It?"](https://www
 - 管理員可以自訂要自動推送的頻道以及觸發推送的最低地震規模。
 - Server Administrators can configure the auto-push toggle, target channels, and minimum magnitude in settings.
 
+### 地震報告更新通知 Earthquake Report Revision Alerts
+
+- 每天台灣時間上午 8 點、下午 8 點同步中央氣象署的顯著有感與小區域有感地震報告；若重新定位或測算造成資料變動，會依地震發生時間順序推送至 `/settings` 設定的頻道。
+- At 08:00 and 20:00 (Taiwan time), synchronizes CWA significant and local earthquake reports. Revisions are sent in origin-time order to channels configured in `/settings`.
+
 ### 即時查詢 Real-time Query
 - 手動查詢最新一筆地震資料，以及 TWERG 體感回報網址。
 - Manually query the latest earthquake data.
 
 ### YouTube 直播監控
 - 監控 YouTube 上的地震監視直播人數（預設為[台灣地震監視](https://www.youtube.com/@%E5%8F%B0%E7%81%A3%E5%9C%B0%E9%9C%87%E7%9B%A3%E8%A6%96)）
+- `/yt` 與觀看人數異常通知會顯示近 12 小時的人數變化圖表。
 - Monitor the viewers in the earthquake live streams on YouTube.
 
 ## 自行部署 / Self-Hosting

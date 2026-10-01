@@ -41,12 +41,14 @@ class SettingsOverviewView(discord.ui.View):
         rmt_status = "`🟢` 已啟用" if self.settings.get("rmt_monitor_enabled") else "`🔴` 已停用"
         grmt_status = "`🟢` 已啟用" if self.settings.get("grmt_monitor_enabled") else "`🔴` 已停用"
         auto_pub_status = "`🟢` 已啟用" if self.settings.get("auto_publish_news") else "`🔴` 已停用"
+        revision_status = "`🟢` 已啟用" if self.settings.get("report_revision_enabled") else "`🔴` 已停用"
         
         embed.add_field(name="⚙️ TWERG 體感回報設定", value=eq_status, inline=False)
         embed.add_field(name="🖥️ YouTube 直播監控", value=yt_status, inline=False)
         embed.add_field(name="📡 RMT 推送設定", value=rmt_status, inline=False)
         embed.add_field(name="🌍 GRMT 推送設定", value=grmt_status, inline=False)
         embed.add_field(name="📢 公告頻道自動發布", value=auto_pub_status, inline=False)
+        embed.add_field(name="📝 地震報告更新推送", value=revision_status, inline=False)
         
         return embed
 
@@ -57,7 +59,8 @@ class SettingsOverviewView(discord.ui.View):
             discord.SelectOption(label="YouTube 直播監控設定", value="yt", emoji="🖥️", description="監控地震直播人數異常增加"),
             discord.SelectOption(label="RMT 推送設定", value="rmt", emoji="📡", description="自動推送 RMT 即時地震動報告"),
             discord.SelectOption(label="GRMT 推送設定", value="grmt", emoji="🌍", description="自動推送 Global RMT 地震動報告"),
-            discord.SelectOption(label="公告自動發布設定", value="auto_pub", emoji="📢", description="自動發布公告頻道的訊息")
+            discord.SelectOption(label="公告自動發布設定", value="auto_pub", emoji="📢", description="自動發布公告頻道的訊息"),
+            discord.SelectOption(label="地震報告更新推送", value="revision", emoji="📝", description="推送中央氣象署重新測定的地震資料")
         ],
         row=0
     )
@@ -73,6 +76,8 @@ class SettingsOverviewView(discord.ui.View):
             view = GRMTSettingsView(self.guild_id)
         elif val == "auto_pub":
             view = AutoPublishSettingsView(self.guild_id)
+        elif val == "revision":
+            view = EarthquakeRevisionSettingsView(self.guild_id)
         
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
@@ -470,6 +475,61 @@ class SettingsView(discord.ui.View):
         )
         self.stop()
 
+class EarthquakeRevisionSettingsView(discord.ui.View):
+    """管理重新定位／測算通知，不與即時地震推播共用開關。"""
+    def __init__(self, guild_id: int | str):
+        super().__init__(timeout=None)
+        self.guild_id = str(guild_id)
+        self.all_settings = load_settings()
+        self.settings = self.all_settings.setdefault(self.guild_id, {})
+        self.settings.setdefault("report_revision_enabled", False)
+        self.settings.setdefault("report_revision_channel_ids", [])
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="`📝` 地震報告更新推送設定",
+            description="每天上午 8 點與下午 8 點同步中央氣象署的顯著有感、小區域有感地震報告；資料重新定位或測算後才會通知。",
+            color=0x3A3A44,
+        )
+        status = "`🟢` 已啟用" if self.settings["report_revision_enabled"] else "`🔴` 已停用"
+        channel_ids = self.settings["report_revision_channel_ids"]
+        channels = "\n".join(f"<#{channel_id}>" for channel_id in channel_ids) if channel_ids else "⚠️ 尚未設定"
+        embed.add_field(name="推送狀態", value=status, inline=False)
+        embed.add_field(name="推送目標頻道列表", value=channels, inline=False)
+        return embed
+
+    @discord.ui.button(label="切換推送狀態", style=discord.ButtonStyle.primary, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.settings["report_revision_enabled"] = not self.settings["report_revision_enabled"]
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text],
+        placeholder="選擇更新推送頻道 (可多選，將覆蓋原設定)",
+        min_values=0,
+        max_values=25,
+        row=1,
+    )
+    async def select_channels(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.settings["report_revision_channel_ids"] = [channel.id for channel in select.values]
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="返回概覽", style=discord.ButtonStyle.secondary, row=2)
+    async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = SettingsOverviewView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=2)
+    async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ **設定已儲存**", embed=self.build_embed(), view=None)
+        self.stop()
+
+
 class AutoPublishSettingsView(discord.ui.View):
     def __init__(self, guild_id: int | str):
         super().__init__(timeout=None)
@@ -522,11 +582,11 @@ class SettingsCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="settings", description="（限管理員）調整伺服器的自動推送與監控設定")
-    @app_commands.default_permissions(administrator=True) # 限管理員可用
+    @app_commands.guild_only()
     async def settings_command(self, interaction: discord.Interaction):
-        # 確認指令是在伺服器內使用
-        if not interaction.guild:
-            await interaction.response.send_message("❌ 此指令只能在伺服器當中使用。", ephemeral=True)
+        # 改在執行階段檢查權限，確保 Discord 能正常註冊並顯示此指令。
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ 此指令僅限伺服器管理員使用。", ephemeral=True)
             return
             
         # 初始化 View 與 Embed

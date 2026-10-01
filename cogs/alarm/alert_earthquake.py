@@ -1,13 +1,11 @@
 import logging
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
 import aiohttp
 import json
 from datetime import datetime, timezone, timedelta
-from module.ownercheck import is_owner
 
-class EarthquakeCog(commands.Cog):
+class EarthquakeAlertCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.last_earthquake_no = None
@@ -204,63 +202,5 @@ class EarthquakeCog(commands.Cog):
     async def before_check_earthquake(self):
         await self.bot.wait_until_ready()
 
-    # ================= 傳統文字指令 *push =================
-    @commands.command(name="push")
-    async def traditional_push(self, ctx, arg1: str = "report", arg2: str = "global"):
-        if not is_owner(ctx.author.id):
-            return
-        
-        push_type = "report"
-        scope = "global"
-        args = [arg1.lower(), arg2.lower()]
-        
-        if "dyfi" in args:
-            push_type = "dyfi"
-        if "local" in args:
-            scope = "local"
-            
-        target_guild_id = None
-        if scope == "local":
-            if not ctx.guild:
-                await ctx.send("❌ 「local (此伺服器)」選項只能在伺服器當中使用。")
-                return
-            target_guild_id = ctx.guild.id
-            
-        temp_msg = await ctx.send("⏳ 正在抓取最新地震資料，請稍候...")
-        await self.fetch_and_send(force=True, target_guild_id=target_guild_id, ctx=ctx, push_type=push_type)
-        await temp_msg.delete()
-
-    # ================= 斜線指令 /push =================
-    @app_commands.command(name="push", description="（限擁有者）強制推送最新的一筆地震報告")
-    @app_commands.describe(scope="推送範圍", push_type="推送類型")
-    @app_commands.choices(
-        scope=[
-            app_commands.Choice(name="此伺服器", value="local"),
-            app_commands.Choice(name="全域", value="global")
-        ],
-        push_type=[
-            app_commands.Choice(name="地震報告", value="report"),
-            app_commands.Choice(name="體感回報", value="dyfi")
-        ]
-    )
-    async def slash_push(self, interaction: discord.Interaction, scope: app_commands.Choice[str], push_type: app_commands.Choice[str] = None):
-        # 權限檢查
-        if not is_owner(interaction.user.id):
-            await interaction.response.send_message("❌ 你沒有權限使用此指令。", ephemeral=True)
-            return
-        
-        target_guild_id = None
-        if scope.value == "local":
-            if not interaction.guild_id:
-                await interaction.response.send_message("❌ 「此伺服器」選項只能在伺服器當中使用。", ephemeral=True)
-                return
-            target_guild_id = interaction.guild_id
-            
-        ptype = push_type.value if push_type else "report"
-            
-        # 避免 API 超時，先顯示思考中 (僅限自己可見)
-        await interaction.response.defer(ephemeral=True)
-        await self.fetch_and_send(force=True, target_guild_id=target_guild_id, interaction=interaction, push_type=ptype)
-
 async def setup(bot):
-    await bot.add_cog(EarthquakeCog(bot))
+    await bot.add_cog(EarthquakeAlertCog(bot))
