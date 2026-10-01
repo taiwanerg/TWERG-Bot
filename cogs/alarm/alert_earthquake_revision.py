@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import math
+import re
 import sqlite3
 import time as clock
 from datetime import datetime, time
@@ -16,6 +18,11 @@ from discord.ext import commands, tasks
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 DATABASE_PATH = Path("data") / "earthquake_reports.db"
 API_DATASETS = ("E-A0015-001", "E-A0016-001")
+LOCAL_EARTHQUAKE_DATASET = "E-A0016-001"
+LOCAL_EVENT_KEY_MIGRATION = "local_event_key_version"
+LOCAL_EVENT_KEY_VERSION = "2"
+LOCAL_FALLBACK_TIME_SECONDS = 10
+LOCAL_FALLBACK_DISTANCE_KM = 5
 # Discord 單一頻道通常有 5 則／5 秒的限制；留出緩衝避免碰到 429。
 CHANNEL_SEND_INTERVAL = 1.1
 GLOBAL_SEND_INTERVAL = 0.06
@@ -57,6 +64,24 @@ class EarthquakeRevisionAlertCog(commands.Cog):
                     PRIMARY KEY (source, earthquake_no)
                 )
             """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS earthquake_report_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+            current_version = connection.execute(
+                "SELECT value FROM earthquake_report_metadata WHERE key = ?",
+                (LOCAL_EVENT_KEY_MIGRATION,),
+            ).fetchone()
+            if current_version is None or current_version[0] != LOCAL_EVENT_KEY_VERSION:
+                # 舊版以共用 EarthquakeNo 當作小區域事件主鍵，資料已無法安全復原。
+                connection.execute("DELETE FROM earthquake_reports WHERE source = ?", (LOCAL_EARTHQUAKE_DATASET,))
+                connection.execute("""
+                    INSERT INTO earthquake_report_metadata (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """, (LOCAL_EVENT_KEY_MIGRATION, LOCAL_EVENT_KEY_VERSION))
+                logging.info("🔄 [地震報告更新] 已重建小區域地震的事件識別基準。")
 
     @tasks.loop(time=(time(hour=8, tzinfo=TAIPEI_TZ), time(hour=20, tzinfo=TAIPEI_TZ)))
     async def sync_reports(self):
@@ -83,14 +108,27 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             reports.extend((dataset, report) for report in result)
 
         changes = []
+        unmatched_local_events = 0
+        ambiguous_local_events = 0
         async with self._database_lock:
             for source, report in reports:
-                change = self._upsert_report(source, report)
-                if change:
-                    changes.append(change)
+                result = self._upsert_report(source, report)
+                if result is None:
+                    continue
+                if result["status"] == "changed":
+                    changes.append(result["change"])
+                elif result["status"] == "unmatched":
+                    unmatched_local_events += 1
+                elif result["status"] == "ambiguous":
+                    ambiguous_local_events += 1
         changes.sort(key=lambda item: self._origin_sort_key(item["new"]["origin_time"]))
         if changes and log_changes:
             logging.info("📝 [地震報告更新] 本次偵測到 %d 筆報告修正，已依發生時間排入推送佇列。", len(changes))
+        if (unmatched_local_events or ambiguous_local_events) and log_changes:
+            logging.warning(
+                "⚠️ [地震報告更新] %d 筆小區域地震找不到安全配對、%d 筆候選不唯一；已建立基準且未推播。",
+                unmatched_local_events, ambiguous_local_events,
+            )
         return changes
 
     async def _fetch_dataset(self, dataset):
@@ -103,29 +141,119 @@ class EarthquakeRevisionAlertCog(commands.Cog):
 
     def _upsert_report(self, source, report):
         snapshot = self._snapshot(report)
-        earthquake_no = str(report.get("EarthquakeNo") or snapshot["origin_time"])
+        event_key = self._event_key(source, report, snapshot)
+        display_earthquake_no = str(report.get("EarthquakeNo") or "未知")
         now = datetime.now(TAIPEI_TZ).isoformat(timespec="seconds")
         with sqlite3.connect(DATABASE_PATH) as connection:
             old_row = connection.execute(
-                "SELECT snapshot_json, report_json FROM earthquake_reports WHERE source = ? AND earthquake_no = ?", (source, earthquake_no)
+                "SELECT snapshot_json, report_json FROM earthquake_reports WHERE source = ? AND earthquake_no = ?", (source, event_key)
             ).fetchone()
+            storage_key = event_key
+            status = "new"
+            fuzzy_matched = False
+            if old_row is None and source == LOCAL_EARTHQUAKE_DATASET:
+                matches = self._find_local_fallback_matches(connection, snapshot)
+                if len(matches) == 1:
+                    storage_key, old_row = matches[0]
+                    fuzzy_matched = True
+                elif len(matches) > 1:
+                    status = "ambiguous"
+                else:
+                    status = "unmatched"
+            elif old_row is not None:
+                status = "changed"
             connection.execute("""
                 INSERT INTO earthquake_reports (source, earthquake_no, origin_time, snapshot_json, report_json, synced_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, earthquake_no) DO UPDATE SET
                     origin_time = excluded.origin_time, snapshot_json = excluded.snapshot_json,
                     report_json = excluded.report_json, synced_at = excluded.synced_at
-            """, (source, earthquake_no, snapshot["origin_time"], json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+            """, (source, storage_key, snapshot["origin_time"], json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
                   json.dumps(report, ensure_ascii=False, sort_keys=True), now))
 
         if old_row is None:
-            return None
+            return {"status": status}
         old_snapshot = json.loads(old_row[0])
         # 資料庫保存完整 API 回應；即使非版面欄位（例如震度區域）修正也要通知。
         report_changed = json.loads(old_row[1]) != report
         if not report_changed:
             return None
-        return {"earthquake_no": earthquake_no, "old": old_snapshot, "new": snapshot}
+        return {
+            "status": "changed",
+            "change": {
+                "earthquake_no": display_earthquake_no,
+                "old": old_snapshot,
+                "new": snapshot,
+                "fuzzy_matched": fuzzy_matched,
+                "web": report.get("Web"),
+            },
+        }
+
+    @staticmethod
+    def _event_key(source, report, snapshot):
+        """顯著有感報告使用 EarthquakeNo；小區域報告使用不含規模的發生秒數。"""
+        if source != LOCAL_EARTHQUAKE_DATASET:
+            return str(report.get("EarthquakeNo") or snapshot["origin_time"])
+
+        web = str(report.get("Web") or "")
+        match = re.search(r"/details/(\d{14})\d*", web)
+        if match:
+            return f"local:{match.group(1)}"
+        origin = EarthquakeRevisionAlertCog._parse_origin_time(snapshot["origin_time"])
+        return f"local:{origin.strftime('%Y%m%d%H%M%S')}" if origin else f"local:{snapshot['origin_time']}"
+
+    @staticmethod
+    def _find_local_fallback_matches(connection, snapshot):
+        """網址事件時間變動時，以唯一的時間／距離候選延續既有事件鍵。"""
+        matches = []
+        rows = connection.execute(
+            "SELECT earthquake_no, snapshot_json, report_json FROM earthquake_reports WHERE source = ?",
+            (LOCAL_EARTHQUAKE_DATASET,),
+        ).fetchall()
+        for event_key, snapshot_json, report_json in rows:
+            old_snapshot = json.loads(snapshot_json)
+            if EarthquakeRevisionAlertCog._is_local_fallback_match(old_snapshot, snapshot):
+                matches.append((event_key, (snapshot_json, report_json)))
+        return matches
+
+    @staticmethod
+    def _is_local_fallback_match(old, new):
+        old_time = EarthquakeRevisionAlertCog._parse_origin_time(old.get("origin_time", ""))
+        new_time = EarthquakeRevisionAlertCog._parse_origin_time(new.get("origin_time", ""))
+        if old_time is None or new_time is None:
+            return False
+        if abs((old_time - new_time).total_seconds()) > LOCAL_FALLBACK_TIME_SECONDS:
+            return False
+        try:
+            return EarthquakeRevisionAlertCog._distance_km(
+                float(old["latitude"]), float(old["longitude"]),
+                float(new["latitude"]), float(new["longitude"]),
+            ) <= LOCAL_FALLBACK_DISTANCE_KM
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _parse_origin_time(value):
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=TAIPEI_TZ) if parsed.tzinfo is None else parsed.astimezone(TAIPEI_TZ)
+        except ValueError:
+            try:
+                return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=TAIPEI_TZ)
+            except ValueError:
+                return None
+
+    @staticmethod
+    def _distance_km(latitude_a, longitude_a, latitude_b, longitude_b):
+        radius_km = 6371.0088
+        latitude_delta = math.radians(latitude_b - latitude_a)
+        longitude_delta = math.radians(longitude_b - longitude_a)
+        haversine = (
+            math.sin(latitude_delta / 2) ** 2
+            + math.cos(math.radians(latitude_a)) * math.cos(math.radians(latitude_b))
+            * math.sin(longitude_delta / 2) ** 2
+        )
+        return radius_km * 2 * math.asin(math.sqrt(haversine))
 
     @staticmethod
     def _snapshot(report):
@@ -193,7 +321,10 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             active_targets = dict(targets)
             # 外層以地震排序，確保每個頻道收到的訊息順序都是發生時間由早到晚。
             for change in changes:
-                embed = self._build_embed(change["old"], change["new"], change["earthquake_no"])
+                embed = self._build_embed(
+                    change["old"], change["new"], change["earthquake_no"],
+                    change.get("fuzzy_matched", False), change.get("web"),
+                )
                 for channel_id, channel in tuple(active_targets.items()):
                     try:
                         await self._send_with_rate_limit(channel_id, channel, embed)
@@ -267,7 +398,7 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             return {}
 
     @staticmethod
-    def _build_embed(old, new, earthquake_no):
+    def _build_embed(old, new, earthquake_no, fuzzy_matched=False, report_url=None):
         def pair(field, formatter=lambda value: value):
             return f"舊 {formatter(old[field])}\n新 {formatter(new[field])}"
 
@@ -277,16 +408,27 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         def depth(value): return value if value == "未知" else f"{value}km"
 
         report_type = EarthquakeRevisionAlertCog._report_type(earthquake_no)
-        embed = discord.Embed(title=report_type, color=0x3A3A44)
+        description = f"[地震報告網址]({report_url})" if report_url else None
+        embed = discord.Embed(title=report_type, description=description, color=0x3A3A44)
+        embed.add_field(name="地震報告編號", value=str(earthquake_no), inline=False)
         embed.add_field(name="規模", value=pair("magnitude", magnitude), inline=True)
         embed.add_field(name="深度", value=pair("depth", depth), inline=True)
         embed.add_field(name="最大震度", value=pair("intensity"), inline=True)
-        embed.add_field(name="位置", value=pair("location"), inline=True)
+        embed.add_field(name="位置", value=pair("location", EarthquakeRevisionAlertCog._display_location), inline=True)
         embed.add_field(name="緯度", value=pair("latitude", latitude), inline=True)
         embed.add_field(name="經度", value=pair("longitude", longitude), inline=True)
         embed.add_field(name="時間", value=pair("origin_time"), inline=False)
-        embed.set_footer(text=f"地震報告編號 {earthquake_no} • 地震資訊請以中央氣象署發布為準")
+        footer = "URL 變動已模糊配對\n資訊請以中央氣象署為準" if fuzzy_matched else "資訊請以中央氣象署為準"
+        embed.set_footer(text=footer)
         return embed
+
+    @staticmethod
+    def _display_location(value):
+        """通知只顯示 CWA 位置文字中括號內的震央地名。"""
+        if value == "未知":
+            return value
+        match = re.search(r"[（(]\s*位於\s*([^）)]+?)\s*[）)]", str(value))
+        return match.group(1).strip() if match else str(value)
 
     @staticmethod
     def _report_type(earthquake_no):
