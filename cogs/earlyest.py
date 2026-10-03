@@ -161,6 +161,21 @@ def _display_value(value, suffix=""):
     return f"{value}{suffix}" if value else "未知"
 
 
+def _display_magnitude(value):
+    if not _valid_magnitude(value):
+        return "未知"
+    return _clean_text(str(value)).rstrip("*")
+
+
+def build_event_content(record):
+    magnitude_type, magnitude = best_magnitude(record)
+    region = record.get("region") or "未知地區"
+    label = f"{magnitude_type}{magnitude} - {region}"
+    for character in ("\\", "*", "_", "~", "`", "|"):
+        label = label.replace(character, f"\\{character}")
+    return f"**{label}**"
+
+
 def build_event_embed(record, image_url=None):
     magnitude_type, magnitude = best_magnitude(record)
     embed = discord.Embed(
@@ -191,9 +206,9 @@ def build_event_embed(record, image_url=None):
     embed.add_field(
         name="規模解算",
         value=(
-            f"mb `{_display_value(record.get('mb'))}`\n"
-            f"Mwp `{_display_value(record.get('mwp'))}`\n"
-            f"Mwpd `{_display_value(record.get('mwpd'))}`"
+            f"mb `{_display_magnitude(record.get('mb'))}`\n"
+            f"Mwp `{_display_magnitude(record.get('mwp'))}`\n"
+            f"Mwpd `{_display_magnitude(record.get('mwpd'))}`"
         ),
         inline=True,
     )
@@ -207,9 +222,11 @@ def build_event_embed(record, image_url=None):
         inline=True,
     )
     embed.set_image(url=image_url or record.get("map_url") or EARLYEST_IMAGE_URL)
+    solution_sequence = record.get("loc_seq")
+    sequence_text = f" • 解算序號 {solution_sequence}" if solution_sequence else ""
     embed.set_footer(
         text=(
-            "INGV Early-est 實驗性自動解算 • 未經地震學家審核\n"
+            f"自動解算未經審核{sequence_text}\n"
             "僅供參考，不可作為海嘯警報或應變依據"
         )
     )
