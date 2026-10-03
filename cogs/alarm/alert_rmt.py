@@ -97,7 +97,7 @@ class RMTAutoPushCog(commands.Cog):
         embed.add_field(name="規模", value=f"M {record['mag']}", inline=True)
         embed.add_field(name="濾波種類", value="10s", inline=True)
         embed.set_image(url=record['img_url'])
-        embed.set_footer(text="中央研究院地球科學研究所 • 圖片內為 UTC 時間")
+        embed.set_footer(text="中央研究院地球科學研究所 • 圖片內為 UTC 時間\n產出之結果可能為未經人工驗證之自動報告")
         
         message_content = "RMT 自動報告"
         

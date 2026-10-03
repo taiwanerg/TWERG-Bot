@@ -40,6 +40,7 @@ class SettingsOverviewView(discord.ui.View):
         yt_status = "`🟢` 已啟用" if self.settings.get("yt_monitor_enabled") else "`🔴` 已停用"
         rmt_status = "`🟢` 已啟用" if self.settings.get("rmt_monitor_enabled") else "`🔴` 已停用"
         grmt_status = "`🟢` 已啟用" if self.settings.get("grmt_monitor_enabled") else "`🔴` 已停用"
+        earlyest_status = "`🟢` 已啟用" if self.settings.get("earlyest_monitor_enabled") else "`🔴` 已停用"
         auto_pub_status = "`🟢` 已啟用" if self.settings.get("auto_publish_news") else "`🔴` 已停用"
         revision_status = "`🟢` 已啟用" if self.settings.get("report_revision_enabled") else "`🔴` 已停用"
         
@@ -47,6 +48,7 @@ class SettingsOverviewView(discord.ui.View):
         embed.add_field(name="🖥️ YouTube 直播監控", value=yt_status, inline=False)
         embed.add_field(name="📡 RMT 推送設定", value=rmt_status, inline=False)
         embed.add_field(name="🌍 GRMT 推送設定", value=grmt_status, inline=False)
+        embed.add_field(name="🌊 Early-est 推送設定", value=earlyest_status, inline=False)
         embed.add_field(name="📢 公告頻道自動發布", value=auto_pub_status, inline=False)
         embed.add_field(name="📝 地震報告更新推送", value=revision_status, inline=False)
         
@@ -59,6 +61,7 @@ class SettingsOverviewView(discord.ui.View):
             discord.SelectOption(label="YouTube 直播監控設定", value="yt", emoji="🖥️", description="監控地震直播人數異常增加"),
             discord.SelectOption(label="RMT 推送設定", value="rmt", emoji="📡", description="自動推送 RMT 即時地震動報告"),
             discord.SelectOption(label="GRMT 推送設定", value="grmt", emoji="🌍", description="自動推送 Global RMT 地震動報告"),
+            discord.SelectOption(label="Early-est 推送設定", value="earlyest", emoji="🌊", description="自動推送 Early-est 即時地震報告"),
             discord.SelectOption(label="公告自動發布設定", value="auto_pub", emoji="📢", description="自動發布公告頻道的訊息"),
             discord.SelectOption(label="地震報告更新推送", value="revision", emoji="📝", description="推送中央氣象署重新測定的地震資料")
         ],
@@ -74,6 +77,8 @@ class SettingsOverviewView(discord.ui.View):
             view = RMTSettingsView(self.guild_id)
         elif val == "grmt":
             view = GRMTSettingsView(self.guild_id)
+        elif val == "earlyest":
+            view = EarlyEstSettingsView(self.guild_id)
         elif val == "auto_pub":
             view = AutoPublishSettingsView(self.guild_id)
         elif val == "revision":
@@ -324,6 +329,73 @@ class GRMTSettingsView(discord.ui.View):
             view=None
         )
         self.stop()
+
+class EarlyEstSettingsView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = str(guild_id)
+        self.all_settings = load_settings()
+
+        if self.guild_id not in self.all_settings:
+            self.all_settings[self.guild_id] = {}
+
+        self.settings = self.all_settings[self.guild_id]
+        if "earlyest_monitor_enabled" not in self.settings:
+            self.settings["earlyest_monitor_enabled"] = False
+        if "earlyest_target_channel_ids" not in self.settings:
+            self.settings["earlyest_target_channel_ids"] = []
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="`🌊` Early-est 地震報告自動推送設定",
+            description="調整當前伺服器的 Early-est 報告自動推送選項。",
+            color=0xe67e22,
+        )
+
+        status = "`🟢` 已啟用" if self.settings.get("earlyest_monitor_enabled") else "`🔴` 已停用"
+        channel_ids = self.settings.get("earlyest_target_channel_ids", [])
+        channel_status = "\n".join([f"<#{channel_id}>" for channel_id in channel_ids]) if channel_ids else "⚠️ 尚未設定"
+
+        embed.add_field(name="推送狀態", value=status, inline=False)
+        embed.add_field(name="推送發送頻道列表", value=channel_status, inline=False)
+        embed.set_footer(text="Early-est 為未經人工審核的實驗性自動解算，不應作為海嘯警報依據。")
+        return embed
+
+    @discord.ui.button(label="切換推送狀態", style=discord.ButtonStyle.primary, row=0)
+    async def toggle_earlyest_monitor(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.settings["earlyest_monitor_enabled"] = not self.settings.get("earlyest_monitor_enabled", False)
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text],
+        placeholder="選擇推送發送頻道 (可多選，將覆蓋原設定)",
+        min_values=0,
+        max_values=25,
+        row=1,
+    )
+    async def select_earlyest_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.settings["earlyest_target_channel_ids"] = [channel.id for channel in select.values]
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="返回概覽", style=discord.ButtonStyle.secondary, row=2)
+    async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = SettingsOverviewView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=2)
+    async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="✅ **設定已儲存**",
+            embed=self.build_embed(),
+            view=None,
+        )
+        self.stop()
+
 
 class SettingsView(discord.ui.View):
     def __init__(self, guild_id: int):

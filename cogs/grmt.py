@@ -56,7 +56,7 @@ class GRMTView(discord.ui.View):
         embed.add_field(name="規模", value=f"M {rec['mag']}", inline=True)
         
         embed.set_image(url=rec['img_url'])
-        embed.set_footer(text="中央研究院地球科學研究所 • 圖片內為 UTC 時間")
+        embed.set_footer(text="中央研究院地球科學研究所 • 圖片內為 UTC 時間\n產出之結果可能為未經人工驗證之自動報告")
         return embed
 
 class GRMTCog(commands.Cog):
