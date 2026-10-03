@@ -97,7 +97,7 @@ def best_magnitude(record):
         value = record.get(key, "")
         if _valid_magnitude(value):
             return label, value.rstrip("*")
-    return "M", "未知"
+    return "M", "-"
 
 
 def parse_event_table(html, limit=None):
@@ -163,7 +163,7 @@ def _display_value(value, suffix=""):
 
 def _display_magnitude(value):
     if not _valid_magnitude(value):
-        return "未知"
+        return "-"
     return _clean_text(str(value)).rstrip("*")
 
 
