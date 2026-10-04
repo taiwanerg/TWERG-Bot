@@ -344,6 +344,8 @@ class EarlyEstSettingsView(discord.ui.View):
             self.settings["earlyest_monitor_enabled"] = False
         if "earlyest_target_channel_ids" not in self.settings:
             self.settings["earlyest_target_channel_ids"] = []
+        if "earlyest_mb_threshold" not in self.settings:
+            self.settings["earlyest_mb_threshold"] = "all"
 
     def build_embed(self) -> discord.Embed:
         embed = discord.Embed(
@@ -355,9 +357,12 @@ class EarlyEstSettingsView(discord.ui.View):
         status = "`🟢` 已啟用" if self.settings.get("earlyest_monitor_enabled") else "`🔴` 已停用"
         channel_ids = self.settings.get("earlyest_target_channel_ids", [])
         channel_status = "\n".join([f"<#{channel_id}>" for channel_id in channel_ids]) if channel_ids else "⚠️ 尚未設定"
+        threshold = self.settings.get("earlyest_mb_threshold", "all")
+        threshold_status = "全部" if threshold == "all" else f"mb ≥ {threshold}"
 
         embed.add_field(name="推送狀態", value=status, inline=False)
         embed.add_field(name="推送發送頻道列表", value=channel_status, inline=False)
+        embed.add_field(name="mb 規模門檻", value=threshold_status, inline=False)
         embed.set_footer(text="Early-est 為未經人工審核的實驗性自動解算，不應作為海嘯警報依據。")
         return embed
 
@@ -382,12 +387,31 @@ class EarlyEstSettingsView(discord.ui.View):
         save_settings(self.all_settings)
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    @discord.ui.button(label="返回概覽", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.select(
+        placeholder="選擇 Early-est mb 推送門檻",
+        options=[
+            discord.SelectOption(label="全部", value="all"),
+            discord.SelectOption(label="mb 4.5 以上", value="4.5"),
+            discord.SelectOption(label="mb 5.0 以上", value="5.0"),
+            discord.SelectOption(label="mb 5.5 以上", value="5.5"),
+            discord.SelectOption(label="mb 6.0 以上", value="6.0"),
+            discord.SelectOption(label="mb 6.5 以上", value="6.5"),
+            discord.SelectOption(label="mb 7.0 以上", value="7.0"),
+        ],
+        row=2,
+    )
+    async def select_earlyest_mb_threshold(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.settings["earlyest_mb_threshold"] = select.values[0]
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="返回概覽", style=discord.ButtonStyle.secondary, row=3)
     async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = SettingsOverviewView(self.guild_id)
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
-    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=2)
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=3)
     async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             content="✅ **設定已儲存**",
