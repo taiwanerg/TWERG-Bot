@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 
@@ -33,6 +34,7 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         self.bot = bot
         self.api_key = self._load_api_key()
         self._database_lock = asyncio.Lock()
+        self._sync_cycle_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._last_channel_send = {}
         self._last_global_send = 0.0
@@ -82,27 +84,64 @@ class EarthquakeRevisionAlertCog(commands.Cog):
 
     @tasks.loop(time=(time(hour=8, tzinfo=TAIPEI_TZ), time(hour=20, tzinfo=TAIPEI_TZ)))
     async def sync_reports(self):
-        changes = await self._sync_all_reports()
-        if changes:
-            await self._send_revision_alerts(changes)
+        await self._run_sync_cycle()
 
     @sync_reports.before_loop
     async def before_sync_reports(self):
         await self.bot.wait_until_ready()
         # 每次啟動都只重建同步基準，絕不能發送 Discord 通知。
         # 離線期間的修正會安靜寫回 DB，下一輪排程才開始偵測新變動。
-        await self._sync_all_reports(log_changes=False)
+        await self._run_sync_cycle(send_alerts=False, log_changes=False)
         logging.info("🔄 [地震報告更新] 啟動基準同步完成；將於每天 08:00、20:00 開始偵測修正。")
 
-    async def _sync_all_reports(self, log_changes=True):
+    @app_commands.command(name="sync_earthquake_reports", description="（限管理員）手動抓取並更新中央氣象署地震報告資料")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def sync_earthquake_reports_command(self, interaction: discord.Interaction):
+        """手動執行與排程相同的同步與修正通知流程。"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ 此指令僅限伺服器管理員使用。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            changes = await self._run_sync_cycle(raise_fetch_errors=True)
+        except Exception as error:
+            logging.exception("❌ [地震報告更新] 管理員手動同步失敗。")
+            await interaction.followup.send(f"❌ 地震報告資料更新失敗：{error}", ephemeral=True)
+            return
+
+        if changes:
+            message = f"✅ 地震報告資料更新完成，偵測到 {len(changes)} 筆修正，已完成通知處理。"
+        else:
+            message = "✅ 地震報告資料更新完成，未偵測到新的修正。"
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def _run_sync_cycle(self, *, send_alerts=True, log_changes=True, raise_fetch_errors=False):
+        """串行化執行一次抓取、寫入與通知，避免排程和手動指令重疊。"""
+        async with self._sync_cycle_lock:
+            changes = await self._sync_all_reports(
+                log_changes=log_changes,
+                raise_fetch_errors=raise_fetch_errors,
+            )
+            if changes and send_alerts:
+                await self._send_revision_alerts(changes)
+            return changes
+
+    async def _sync_all_reports(self, log_changes=True, raise_fetch_errors=False):
         """抓取兩個端點並回傳有欄位修正的報告，依發生時間排序。"""
         results = await asyncio.gather(*(self._fetch_dataset(dataset) for dataset in API_DATASETS), return_exceptions=True)
         reports = []
+        fetch_errors = []
         for dataset, result in zip(API_DATASETS, results):
             if isinstance(result, Exception):
                 logging.error(f"❌ [地震報告更新] 取得 {dataset} 失敗：{result}")
+                fetch_errors.append(f"{dataset}：{result}")
                 continue
             reports.extend((dataset, report) for report in result)
+
+        if fetch_errors and raise_fetch_errors:
+            raise RuntimeError("；".join(fetch_errors))
 
         changes = []
         async with self._database_lock:
