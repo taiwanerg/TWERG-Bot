@@ -23,6 +23,7 @@ Its main purpose is to automatically push [TWERG "Did You Feel It?"](https://www
 ### 地震報告更新通知 Earthquake Report Revision Alerts
 
 - 每天台灣時間上午 8 點、下午 8 點同步中央氣象署的顯著有感與小區域有感地震報告；管理員可在 `/settings` 額外啟用 ExpTech v2 來源比對。同一來源前後數值改變會標示為報告更新，首次發現跨來源不同則標示為來源資料差異。
+- 所有人都能使用 `/earthquake_report_update` 輸入地震編號，查詢 2026/10/06 起由機器人記錄的顯著有感地震報告新舊資料；不提供小區域及遠地有感地震查詢。
 - At 08:00 and 20:00 (Taiwan time), synchronizes CWA significant and local earthquake reports. Administrators can optionally enable ExpTech v2 comparison in `/settings`; same-source revisions and first-seen cross-source differences are labeled separately.
 
 ### 即時查詢 Real-time Query

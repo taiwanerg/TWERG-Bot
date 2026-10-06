@@ -13,6 +13,7 @@ class HelpView(discord.ui.View):
         embed_general.add_field(name="/dyfi", value="📃 最新一筆 TWERG 體感回報的網址和簡易地震報告", inline=False)
         embed_general.add_field(name="/eewnow", value="🌐 查詢 地牛Wake Up! 的在線人數", inline=False)
         embed_general.add_field(name="/earlyest", value="🌊 查詢近期 Early-est 地震與海嘯潛勢自動解算", inline=False)
+        embed_general.add_field(name="/earthquake_report_update", value="📝 查詢 2026/10/06 起記錄的顯著有感地震報告新舊資料", inline=False)
         embed_general.add_field(name="/emulator", value="🌍 簡易地震模擬器", inline=False)
         embed_general.add_field(name="/help", value="🛠️ 使用幫助", inline=False)
         embed_general.add_field(name="/intensity", value="🌍 透過輸入 PGA 和 PGV 大約換算各國地震震度", inline=False)

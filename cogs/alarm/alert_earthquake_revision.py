@@ -37,6 +37,8 @@ LOCAL_MATCH_KM = 100
 CHANNEL_SEND_INTERVAL = 1.1
 GLOBAL_SEND_INTERVAL = 0.06
 MAX_RATE_LIMIT_RETRIES = 3
+REVISION_HISTORY_START_DATE = "2026/10/06"
+REVISION_HISTORY_METADATA_KEY = "revision_history_available_since"
 
 
 class EarthquakeRevisionAlertCog(commands.Cog):
@@ -109,6 +111,30 @@ class EarthquakeRevisionAlertCog(commands.Cog):
                     PRIMARY KEY (guild_id, event_key, notification_hash)
                 )
             """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS earthquake_report_changes (
+                    change_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_key TEXT NOT NULL,
+                    notification_hash TEXT NOT NULL,
+                    earthquake_no TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    old_snapshot_json TEXT NOT NULL,
+                    new_snapshot_json TEXT NOT NULL,
+                    old_source TEXT NOT NULL,
+                    new_source TEXT NOT NULL,
+                    web TEXT,
+                    detected_at TEXT NOT NULL
+                )
+            """)
+            connection.execute("""
+                CREATE INDEX IF NOT EXISTS earthquake_report_changes_number_time
+                ON earthquake_report_changes (earthquake_no, detected_at DESC)
+            """)
+            connection.execute("""
+                INSERT OR IGNORE INTO earthquake_report_metadata (key, value)
+                VALUES (?, ?)
+            """, (REVISION_HISTORY_METADATA_KEY, self._now()))
 
             current_version = connection.execute(
                 "SELECT value FROM earthquake_report_metadata WHERE key = ?",
@@ -197,6 +223,55 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         if result["errors"]:
             message += "\n⚠️ " + "；".join(result["errors"])
         await interaction.followup.send(message, ephemeral=True)
+
+    @app_commands.command(
+        name="earthquake_report_update",
+        description=f"查詢 {REVISION_HISTORY_START_DATE} 起記錄的顯著有感地震報告新舊資料",
+    )
+    @app_commands.describe(
+        earthquake_no="地震編號，例如 115067（不支援小區域 000、遠地有感 999）"
+    )
+    async def earthquake_report_update_command(
+        self, interaction: discord.Interaction, earthquake_no: str
+    ):
+        earthquake_no = self._normalize_report_number(earthquake_no)
+        rejection = self._report_query_rejection(earthquake_no)
+        if rejection:
+            await interaction.response.send_message(rejection, ephemeral=True)
+            return
+
+        change = self._latest_queryable_change(earthquake_no)
+        available_since = self._history_available_since_display()
+        if change is None:
+            await interaction.response.send_message(
+                f"🔎 查無第 {earthquake_no} 號自 {available_since}起由 TWERG 記錄的更新。\n"
+                "這不代表該時間以前沒有修正過；較早的變更因未建立資料而無法查詢。",
+                ephemeral=True,
+            )
+            return
+
+        embed = self._build_embed(
+            change["old"],
+            change["new"],
+            change["earthquake_no"],
+            change.get("web"),
+            kind=change["kind"],
+            old_source=change["old_source"],
+            new_source=change["new_source"],
+        )
+        embed.title = f"第 {earthquake_no} 號最近一次{embed.title}"
+        embed.add_field(
+            name="資料可查詢範圍",
+            value=f"僅包含 {available_since}起由 TWERG 保存的資料。",
+            inline=False,
+        )
+        if change.get("detected_at"):
+            embed.add_field(
+                name="偵測時間",
+                value=self._format_taipei_time(change["detected_at"]),
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def enable_exptech_for_guild(self, guild_id):
         """Run the immediate first reconciliation requested by the settings UI."""
@@ -358,7 +433,7 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         if old_row is None or json.loads(old_row[1]) == report:
             return None
         old_snapshot = self._normalize_snapshot(json.loads(old_row[0]))
-        return self._make_change(
+        change = self._make_change(
             event_key=event_key,
             earthquake_no=display_no,
             kind="revision",
@@ -370,6 +445,8 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             new_source="CWA",
             version_material=report_json,
         )
+        self._record_change(change)
+        return change
 
     def _upsert_exptech_report(self, report):
         snapshot = self._exptech_snapshot(report)
@@ -410,7 +487,7 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             old_snapshot = self._normalize_snapshot(json.loads(old_row[0]))
             if old_snapshot == snapshot:
                 return None
-            return self._make_change(
+            change = self._make_change(
                 event_key=event_key,
                 earthquake_no=display_no,
                 kind="revision",
@@ -421,11 +498,13 @@ class EarthquakeRevisionAlertCog(commands.Cog):
                 old_source="ExpTech v2",
                 new_source="ExpTech v2",
             )
+            self._record_change(change)
+            return change
 
         if matched_existing and cwa_row is not None:
             cwa_snapshot = self._normalize_snapshot(json.loads(cwa_row[0]))
             if cwa_snapshot != snapshot:
-                return self._make_change(
+                change = self._make_change(
                     event_key=event_key,
                     earthquake_no=display_no,
                     kind="difference",
@@ -436,6 +515,8 @@ class EarthquakeRevisionAlertCog(commands.Cog):
                     old_source="CWA",
                     new_source="ExpTech v2",
                 )
+                self._record_change(change)
+                return change
         return None
 
     def _current_source_differences(self):
@@ -815,6 +896,116 @@ class EarthquakeRevisionAlertCog(commands.Cog):
                 VALUES (?, ?, ?, ?)
             """, (str(guild_id), change["event_key"], change["notification_hash"], self._now()))
 
+    def _record_change(self, change):
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
+            connection.execute("""
+                INSERT INTO earthquake_report_changes (
+                    event_key, notification_hash, earthquake_no, kind, provider,
+                    old_snapshot_json, new_snapshot_json, old_source, new_source,
+                    web, detected_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                change["event_key"],
+                change["notification_hash"],
+                str(change["earthquake_no"]),
+                change["kind"],
+                change["provider"],
+                json.dumps(change["old"], ensure_ascii=False, sort_keys=True),
+                json.dumps(change["new"], ensure_ascii=False, sort_keys=True),
+                change["old_source"],
+                change["new_source"],
+                change.get("web"),
+                self._now(),
+            ))
+
+    def _latest_queryable_change(self, earthquake_no):
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
+            row = connection.execute("""
+                SELECT event_key, notification_hash, earthquake_no, kind, provider,
+                       old_snapshot_json, new_snapshot_json, old_source, new_source,
+                       web, detected_at
+                FROM earthquake_report_changes
+                WHERE earthquake_no = ?
+                ORDER BY detected_at DESC, change_id DESC
+                LIMIT 1
+            """, (earthquake_no,)).fetchone()
+            if row is not None:
+                return {
+                    "event_key": row[0],
+                    "notification_hash": row[1],
+                    "earthquake_no": row[2],
+                    "kind": row[3],
+                    "provider": row[4],
+                    "old": self._normalize_snapshot(json.loads(row[5])),
+                    "new": self._normalize_snapshot(json.loads(row[6])),
+                    "old_source": row[7],
+                    "new_source": row[8],
+                    "web": row[9],
+                    "detected_at": row[10],
+                }
+
+            event_key = f"report:{earthquake_no}"
+            cwa_row = connection.execute("""
+                SELECT snapshot_json, report_json, synced_at
+                FROM earthquake_reports
+                WHERE source = ? AND earthquake_no = ?
+            """, (API_DATASETS[0], earthquake_no)).fetchone()
+            exptech_row = connection.execute("""
+                SELECT snapshot_json, report_json, synced_at
+                FROM earthquake_reports
+                WHERE source = ? AND earthquake_no = ?
+            """, (EXPTECH_SOURCE, event_key)).fetchone()
+            if cwa_row is None or exptech_row is None:
+                return None
+            old = self._normalize_snapshot(json.loads(cwa_row[0]))
+            new = self._normalize_snapshot(json.loads(exptech_row[0]))
+            if old == new:
+                return None
+            report = json.loads(exptech_row[1])
+            change = self._make_change(
+                event_key=event_key,
+                earthquake_no=earthquake_no,
+                kind="difference",
+                provider="exptech",
+                old=old,
+                new=new,
+                web=self._exptech_report_url(str(report.get("id", ""))),
+                old_source="CWA",
+                new_source="ExpTech v2",
+            )
+            change["detected_at"] = max(cwa_row[2], exptech_row[2])
+            return change
+
+    @staticmethod
+    def _normalize_report_number(value):
+        match = re.fullmatch(r"\s*(?:第\s*)?(\d{6})(?:\s*號)?\s*", str(value))
+        return match.group(1) if match else str(value).strip()
+
+    @staticmethod
+    def _report_query_rejection(earthquake_no):
+        if not re.fullmatch(r"\d{6}", earthquake_no):
+            return "❌ 請輸入六位數地震編號，例如 `115067`。"
+        if earthquake_no.endswith("000"):
+            return "❌ 此指令不提供小區域地震報告查詢。"
+        if earthquake_no.endswith("999"):
+            return "❌ 此指令不提供遠地有感地震報告查詢。"
+        return None
+
+    def _history_available_since_display(self):
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
+            row = connection.execute(
+                "SELECT value FROM earthquake_report_metadata WHERE key = ?",
+                (REVISION_HISTORY_METADATA_KEY,),
+            ).fetchone()
+        if row is None:
+            return f"{REVISION_HISTORY_START_DATE}（台灣時間）"
+        return f"{self._format_taipei_time(row[0])}（台灣時間）"
+
+    @staticmethod
+    def _format_taipei_time(value):
+        parsed = EarthquakeRevisionAlertCog._parse_origin_time(value)
+        return parsed.strftime("%Y/%m/%d %H:%M:%S") if parsed else str(value)
+
     async def _send_with_rate_limit(self, channel_id, channel, embed, kind="revision"):
         now = clock.monotonic()
         wait_time = max(
@@ -871,12 +1062,20 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             old_value = formatter(old[field])
             new_value = formatter(new[field])
             if kind == "difference":
-                return f"{old_source} {old_value}\n{new_source} {new_value}"
+                old_label = old_source.removesuffix(" v2")
+                new_label = new_source.removesuffix(" v2")
+                return f"{old_label} {old_value}\n{new_label} {new_value}"
             return f"不變 {old_value}" if old_value == new_value else f"舊 {old_value}\n新 {new_value}"
 
         def longitude(value): return value if value == "未知" else f"{value}°E"
         def latitude(value): return value if value == "未知" else f"{value}°N"
-        def magnitude(value): return value if value == "未知" else f"M{value}"
+        def magnitude(value):
+            if value == "未知":
+                return value
+            try:
+                return f"M{Decimal(str(value)):.1f}"
+            except InvalidOperation:
+                return f"M{value}"
         def depth(value): return value if value == "未知" else f"{value}km"
         def intensity(value):
             value = str(value)
