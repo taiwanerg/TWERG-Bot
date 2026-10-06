@@ -10,4 +10,5 @@ guild_settings.json
 /data/earthquake_reports.db
 /data/youtube_viewers.db
 /data/.matplotlib/
-/tests
+/tests/*
+!/tests/test_earthquake_revision.py

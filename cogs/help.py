@@ -23,7 +23,7 @@ class HelpView(discord.ui.View):
         
         embed_admin = discord.Embed(title="管理員指令", color=0xff3846, description="需要管理員權限才能使用的指令")
         embed_admin.add_field(name="/settings", value="⚙️ 顯示或修改機器人的設定", inline=False)
-        embed_admin.add_field(name="/sync_earthquake_reports", value="🔄 手動抓取並更新中央氣象署地震報告資料", inline=False)
+        embed_admin.add_field(name="/sync_earthquake_reports", value="🔄 依 `/settings` 資料來源設定手動同步地震報告", inline=False)
         
         embed_owner = discord.Embed(title="擁有者指令", color=0x9b59b6, description="僅限機器人擁有者使用的指令")
         embed_owner.add_field(name="/guilds", value="🤖 顯示機器人加入的伺服器列表與活躍狀態", inline=False)

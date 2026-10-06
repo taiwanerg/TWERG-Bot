@@ -1,12 +1,16 @@
-"""同步 CWA 地震報告，並通知已發布報告的重新測定結果。"""
+"""Synchronize CWA/ExpTech earthquake reports and announce revisions."""
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import re
 import sqlite3
 import time as clock
+from contextlib import closing
 from datetime import datetime, time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -19,16 +23,24 @@ TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 DATABASE_PATH = Path("data") / "earthquake_reports.db"
 API_DATASETS = ("E-A0015-001", "E-A0016-001")
 LOCAL_EARTHQUAKE_DATASET = "E-A0016-001"
+EXPTECH_SOURCE = "EXPTECH-V2"
+EXPTECH_ENDPOINTS = (
+    "https://api.core-tyo1.exptech.dev/api/v2/eq/report?limit=150",
+    "https://api.core-tnn1.exptech.dev/api/v2/eq/report?limit=150",
+)
 LOCAL_EVENT_KEY_MIGRATION = "local_event_key_version"
 LOCAL_EVENT_KEY_VERSION = "3"
-# Discord 單一頻道通常有 5 則／5 秒的限制；留出緩衝避免碰到 429。
+CANONICAL_STATE_MIGRATION = "canonical_state_version"
+CANONICAL_STATE_VERSION = "1"
+LOCAL_MATCH_SECONDS = 120
+LOCAL_MATCH_KM = 100
 CHANNEL_SEND_INTERVAL = 1.1
 GLOBAL_SEND_INTERVAL = 0.06
 MAX_RATE_LIMIT_RETRIES = 3
 
 
 class EarthquakeRevisionAlertCog(commands.Cog):
-    """每天兩次將兩種 CWA 地震報告存檔並偵測修正。"""
+    """Synchronize report snapshots twice daily and announce material changes."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -51,7 +63,7 @@ class EarthquakeRevisionAlertCog(commands.Cog):
 
     def _create_database(self):
         DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(DATABASE_PATH) as connection:
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS earthquake_reports (
                     source TEXT NOT NULL,
@@ -69,18 +81,85 @@ class EarthquakeRevisionAlertCog(commands.Cog):
                     value TEXT NOT NULL
                 )
             """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS earthquake_event_state (
+                    event_key TEXT PRIMARY KEY,
+                    earthquake_no TEXT NOT NULL,
+                    origin_time TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    web TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS earthquake_event_aliases (
+                    provider TEXT NOT NULL,
+                    provider_event_id TEXT NOT NULL,
+                    event_key TEXT NOT NULL,
+                    PRIMARY KEY (provider, provider_event_id)
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS earthquake_report_notifications (
+                    guild_id TEXT NOT NULL,
+                    event_key TEXT NOT NULL,
+                    notification_hash TEXT NOT NULL,
+                    notified_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, event_key, notification_hash)
+                )
+            """)
+
             current_version = connection.execute(
                 "SELECT value FROM earthquake_report_metadata WHERE key = ?",
                 (LOCAL_EVENT_KEY_MIGRATION,),
             ).fetchone()
             if current_version is None or current_version[0] != LOCAL_EVENT_KEY_VERSION:
-                # 舊版以共用 EarthquakeNo 當作小區域事件主鍵，資料已無法安全復原。
-                connection.execute("DELETE FROM earthquake_reports WHERE source = ?", (LOCAL_EARTHQUAKE_DATASET,))
+                connection.execute(
+                    "DELETE FROM earthquake_reports WHERE source = ?",
+                    (LOCAL_EARTHQUAKE_DATASET,),
+                )
                 connection.execute("""
                     INSERT INTO earthquake_report_metadata (key, value) VALUES (?, ?)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """, (LOCAL_EVENT_KEY_MIGRATION, LOCAL_EVENT_KEY_VERSION))
                 logging.info("🔄 [地震報告更新] 已重建小區域地震的事件識別基準。")
+
+            canonical_version = connection.execute(
+                "SELECT value FROM earthquake_report_metadata WHERE key = ?",
+                (CANONICAL_STATE_MIGRATION,),
+            ).fetchone()
+            if canonical_version is None or canonical_version[0] != CANONICAL_STATE_VERSION:
+                self._seed_canonical_state(connection)
+                connection.execute("""
+                    INSERT INTO earthquake_report_metadata (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """, (CANONICAL_STATE_MIGRATION, CANONICAL_STATE_VERSION))
+
+    def _seed_canonical_state(self, connection):
+        """Silently seed canonical events from the existing CWA database."""
+        rows = connection.execute("""
+            SELECT source, earthquake_no, snapshot_json, report_json, synced_at
+            FROM earthquake_reports WHERE source != ?
+        """, (EXPTECH_SOURCE,)).fetchall()
+        for source, storage_key, snapshot_json, report_json, synced_at in rows:
+            snapshot = self._normalize_snapshot(json.loads(snapshot_json))
+            report = json.loads(report_json)
+            display_no = str(report.get("EarthquakeNo") or storage_key)
+            event_key = self._canonical_cwa_key(source, storage_key, display_no)
+            connection.execute("""
+                INSERT OR IGNORE INTO earthquake_event_state
+                    (event_key, earthquake_no, origin_time, snapshot_json, provider, web, updated_at)
+                VALUES (?, ?, ?, ?, 'cwa', ?, ?)
+            """, (
+                event_key,
+                display_no,
+                snapshot["origin_time"],
+                json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                report.get("Web"),
+                synced_at,
+            ))
+        logging.info("🔄 [地震報告更新] 已從現有 CWA 資料建立 canonical event 基準。")
 
     @tasks.loop(time=(time(hour=8, tzinfo=TAIPEI_TZ), time(hour=20, tzinfo=TAIPEI_TZ)))
     async def sync_reports(self):
@@ -89,72 +168,134 @@ class EarthquakeRevisionAlertCog(commands.Cog):
     @sync_reports.before_loop
     async def before_sync_reports(self):
         await self.bot.wait_until_ready()
-        # 每次啟動都只重建同步基準，絕不能發送 Discord 通知。
-        # 離線期間的修正會安靜寫回 DB，下一輪排程才開始偵測新變動。
         await self._run_sync_cycle(send_alerts=False, log_changes=False)
         logging.info("🔄 [地震報告更新] 啟動基準同步完成；將於每天 08:00、20:00 開始偵測修正。")
 
-    @app_commands.command(name="sync_earthquake_reports", description="（限管理員）手動抓取並更新中央氣象署地震報告資料")
+    @app_commands.command(name="sync_earthquake_reports", description="（限管理員）手動抓取並更新地震報告資料")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def sync_earthquake_reports_command(self, interaction: discord.Interaction):
-        """手動執行與排程相同的同步與修正通知流程。"""
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ 此指令僅限伺服器管理員使用。", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            changes = await self._run_sync_cycle(raise_fetch_errors=True)
-        except Exception as error:
-            logging.exception("❌ [地震報告更新] 管理員手動同步失敗。")
-            await interaction.followup.send(f"❌ 地震報告資料更新失敗：{error}", ephemeral=True)
-            return
-
-        if changes:
-            message = f"✅ 地震報告資料更新完成，偵測到 {len(changes)} 筆修正，已完成通知處理。"
-        else:
-            message = "✅ 地震報告資料更新完成，未偵測到新的修正。"
+        guild_id = str(interaction.guild.id)
+        use_exptech = self._guild_uses_exptech(guild_id)
+        result = await self._run_sync_cycle(
+            target_guild_id=guild_id,
+            include_exptech=use_exptech,
+            raise_fetch_errors=False,
+        )
+        difference_count = sum(change["kind"] == "difference" for change in result["changes"])
+        revision_count = sum(change["kind"] == "revision" for change in result["changes"])
+        providers = "CWA + ExpTech v2" if use_exptech else "CWA"
+        message = (
+            f"✅ 地震報告同步完成（{providers}）："
+            f"來源差異 {difference_count} 筆、已確認修訂 {revision_count} 筆。"
+        )
+        if result["errors"]:
+            message += "\n⚠️ " + "；".join(result["errors"])
         await interaction.followup.send(message, ephemeral=True)
 
-    async def _run_sync_cycle(self, *, send_alerts=True, log_changes=True, raise_fetch_errors=False):
-        """串行化執行一次抓取、寫入與通知，避免排程和手動指令重疊。"""
+    async def enable_exptech_for_guild(self, guild_id):
+        """Run the immediate first reconciliation requested by the settings UI."""
+        guild_id = str(guild_id)
         async with self._sync_cycle_lock:
-            changes = await self._sync_all_reports(
+            result = await self._sync_all_reports(include_exptech=True, log_changes=True)
+            current_differences = self._current_source_differences()
+            changes = self._unique_changes([*result["changes"], *current_differences])
+            delivery = await self._send_revision_alerts(changes, target_guild_id=guild_id)
+            return {
+                "differences": sum(item["kind"] == "difference" for item in current_differences),
+                "revisions": sum(item["kind"] == "revision" for item in result["changes"]),
+                "sent": delivery["sent"],
+                "errors": result["errors"],
+            }
+
+    async def _run_sync_cycle(
+        self,
+        *,
+        send_alerts=True,
+        log_changes=True,
+        raise_fetch_errors=False,
+        target_guild_id=None,
+        include_exptech=None,
+    ):
+        async with self._sync_cycle_lock:
+            if include_exptech is None:
+                include_exptech = self._any_guild_uses_exptech()
+            result = await self._sync_all_reports(
+                include_exptech=include_exptech,
                 log_changes=log_changes,
-                raise_fetch_errors=raise_fetch_errors,
             )
-            if changes and send_alerts:
-                await self._send_revision_alerts(changes)
-            return changes
+            if raise_fetch_errors and result["errors"] and not result["providers_ok"]:
+                raise RuntimeError("；".join(result["errors"]))
+            if result["changes"] and send_alerts:
+                result["delivery"] = await self._send_revision_alerts(
+                    result["changes"], target_guild_id=target_guild_id
+                )
+            else:
+                result["delivery"] = {"sent": 0, "guilds": 0}
+            return result
 
-    async def _sync_all_reports(self, log_changes=True, raise_fetch_errors=False):
-        """抓取兩個端點並回傳有欄位修正的報告，依發生時間排序。"""
-        results = await asyncio.gather(*(self._fetch_dataset(dataset) for dataset in API_DATASETS), return_exceptions=True)
-        reports = []
-        fetch_errors = []
-        for dataset, result in zip(API_DATASETS, results):
+    async def _sync_all_reports(self, *, include_exptech=False, log_changes=True):
+        cwa_results = await asyncio.gather(
+            *(self._fetch_dataset(dataset) for dataset in API_DATASETS),
+            return_exceptions=True,
+        )
+        errors = []
+        providers_ok = set()
+        cwa_reports = []
+        for dataset, result in zip(API_DATASETS, cwa_results):
             if isinstance(result, Exception):
-                logging.error(f"❌ [地震報告更新] 取得 {dataset} 失敗：{result}")
-                fetch_errors.append(f"{dataset}：{result}")
-                continue
-            reports.extend((dataset, report) for report in result)
+                message = f"CWA {dataset}：{result}"
+                logging.error("❌ [地震報告更新] %s", message)
+                errors.append(message)
+            else:
+                providers_ok.add("cwa")
+                cwa_reports.extend((dataset, report) for report in result)
 
-        if fetch_errors and raise_fetch_errors:
-            raise RuntimeError("；".join(fetch_errors))
+        exptech_reports = []
+        if include_exptech:
+            try:
+                exptech_reports = await self._fetch_exptech_reports()
+                providers_ok.add("exptech")
+            except Exception as error:
+                message = f"ExpTech v2：{error}"
+                logging.error("❌ [地震報告更新] %s", message)
+                errors.append(message)
 
         changes = []
         async with self._database_lock:
-            for source, report in reports:
-                result = self._upsert_report(source, report)
-                if result is None:
-                    continue
-                if result["status"] == "changed":
-                    changes.append(result["change"])
+            for source, report in cwa_reports:
+                change = self._upsert_cwa_report(source, report)
+                if change:
+                    changes.append(change)
+            # A single canonical local event may be claimed by only one
+            # ExpTech row in a response. This prevents two genuine quakes a
+            # few seconds apart from overwriting one another in the raw table.
+            self._exptech_claimed_event_keys = set()
+            for report in exptech_reports:
+                change = self._upsert_exptech_report(report)
+                if change:
+                    changes.append(change)
+
+        changes = self._unique_changes(changes)
         changes.sort(key=lambda item: self._origin_sort_key(item["new"]["origin_time"]))
         if changes and log_changes:
-            logging.info("📝 [地震報告更新] 本次偵測到 %d 筆報告修正，已依發生時間排入推送佇列。", len(changes))
-        return changes
+            logging.info(
+                "📝 [地震報告更新] 偵測到 %d 筆變動（來源差異 %d、修訂 %d）。",
+                len(changes),
+                sum(item["kind"] == "difference" for item in changes),
+                sum(item["kind"] == "revision" for item in changes),
+            )
+        return {
+            "changes": changes,
+            "errors": errors,
+            "providers_ok": providers_ok,
+            "counts": {"cwa": len(cwa_reports), "exptech": len(exptech_reports)},
+        }
 
     async def _fetch_dataset(self, dataset):
         url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset}?Authorization={self.api_key}&format=JSON"
@@ -162,51 +303,274 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             if response.status != 200:
                 raise RuntimeError(f"HTTP {response.status}")
             data = await response.json()
+        if str(data.get("success", "true")).lower() != "true":
+            raise RuntimeError("回應 success=false")
         return data.get("records", {}).get("Earthquake", [])
 
-    def _upsert_report(self, source, report):
-        snapshot = self._snapshot(report)
-        event_key = self._event_key(source, report, snapshot)
-        display_earthquake_no = str(report.get("EarthquakeNo") or "未知")
-        now = datetime.now(TAIPEI_TZ).isoformat(timespec="seconds")
-        with sqlite3.connect(DATABASE_PATH) as connection:
-            old_row = connection.execute(
-                "SELECT snapshot_json, report_json FROM earthquake_reports WHERE source = ? AND earthquake_no = ?", (source, event_key)
-            ).fetchone()
-            storage_key = event_key
-            status = "changed" if old_row is not None else "new"
+    async def _fetch_exptech_reports(self):
+        failures = []
+        for url in EXPTECH_ENDPOINTS:
+            try:
+                async with self.bot.session.get(url) as response:
+                    if response.status != 200:
+                        raise RuntimeError(f"HTTP {response.status}")
+                    data = await response.json()
+                if not isinstance(data, list):
+                    raise RuntimeError("回應不是列表")
+                return data
+            except Exception as error:
+                failures.append(f"{url.split('/')[2]} {error}")
+        raise RuntimeError("；".join(failures))
+
+    def _upsert_cwa_report(self, source, report):
+        snapshot = self._normalize_snapshot(self._snapshot(report))
+        storage_key = self._event_key(source, report, snapshot)
+        display_no = str(report.get("EarthquakeNo") or "未知")
+        event_key = self._canonical_cwa_key(source, storage_key, display_no)
+        now = self._now()
+        report_json = json.dumps(report, ensure_ascii=False, sort_keys=True)
+        snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
+            old_row = connection.execute("""
+                SELECT snapshot_json, report_json FROM earthquake_reports
+                WHERE source = ? AND earthquake_no = ?
+            """, (source, storage_key)).fetchone()
             connection.execute("""
-                INSERT INTO earthquake_reports (source, earthquake_no, origin_time, snapshot_json, report_json, synced_at)
+                INSERT INTO earthquake_reports
+                    (source, earthquake_no, origin_time, snapshot_json, report_json, synced_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, earthquake_no) DO UPDATE SET
-                    origin_time = excluded.origin_time, snapshot_json = excluded.snapshot_json,
-                    report_json = excluded.report_json, synced_at = excluded.synced_at
-            """, (source, storage_key, snapshot["origin_time"], json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
-                  json.dumps(report, ensure_ascii=False, sort_keys=True), now))
+                    origin_time = excluded.origin_time,
+                    snapshot_json = excluded.snapshot_json,
+                    report_json = excluded.report_json,
+                    synced_at = excluded.synced_at
+            """, (source, storage_key, snapshot["origin_time"], snapshot_json, report_json, now))
+            canonical = connection.execute(
+                "SELECT provider FROM earthquake_event_state WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+            if canonical is None or canonical[0] != "exptech":
+                self._write_canonical(
+                    connection, event_key, display_no, snapshot, "cwa", report.get("Web"), now
+                )
 
-        if old_row is None:
-            return {"status": status}
-        old_snapshot = json.loads(old_row[0])
-        # 資料庫保存完整 API 回應；即使非版面欄位（例如震度區域）修正也要通知。
-        report_changed = json.loads(old_row[1]) != report
-        if not report_changed:
+        if old_row is None or json.loads(old_row[1]) == report:
             return None
-        return {
-            "status": "changed",
-            "change": {
-                "earthquake_no": display_earthquake_no,
-                "old": old_snapshot,
-                "new": snapshot,
-                "web": report.get("Web"),
-            },
-        }
+        old_snapshot = self._normalize_snapshot(json.loads(old_row[0]))
+        return self._make_change(
+            event_key=event_key,
+            earthquake_no=display_no,
+            kind="revision",
+            provider="cwa",
+            old=old_snapshot,
+            new=snapshot,
+            web=report.get("Web"),
+            old_source="CWA",
+            new_source="CWA",
+            version_material=report_json,
+        )
+
+    def _upsert_exptech_report(self, report):
+        snapshot = self._exptech_snapshot(report)
+        display_no = str(report.get("id", "未知")).split("-")[0]
+        provider_id = str(report.get("id") or f"{display_no}-{snapshot['origin_time']}")
+        event_key, matched_existing = self._match_exptech_event(provider_id, display_no, snapshot)
+        now = self._now()
+        report_json = json.dumps(report, ensure_ascii=False, sort_keys=True)
+        snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+        web = self._exptech_report_url(provider_id)
+
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
+            old_row = connection.execute("""
+                SELECT snapshot_json FROM earthquake_reports
+                WHERE source = ? AND earthquake_no = ?
+            """, (EXPTECH_SOURCE, event_key)).fetchone()
+            cwa_row = self._cwa_row_for_event(connection, event_key, display_no)
+            connection.execute("""
+                INSERT INTO earthquake_reports
+                    (source, earthquake_no, origin_time, snapshot_json, report_json, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source, earthquake_no) DO UPDATE SET
+                    origin_time = excluded.origin_time,
+                    snapshot_json = excluded.snapshot_json,
+                    report_json = excluded.report_json,
+                    synced_at = excluded.synced_at
+            """, (EXPTECH_SOURCE, event_key, snapshot["origin_time"], snapshot_json, report_json, now))
+            connection.execute("""
+                INSERT INTO earthquake_event_aliases (provider, provider_event_id, event_key)
+                VALUES ('exptech', ?, ?)
+                ON CONFLICT(provider, provider_event_id) DO UPDATE SET event_key = excluded.event_key
+            """, (provider_id, event_key))
+            self._write_canonical(
+                connection, event_key, display_no, snapshot, "exptech", web, now
+            )
+
+        if old_row is not None:
+            old_snapshot = self._normalize_snapshot(json.loads(old_row[0]))
+            if old_snapshot == snapshot:
+                return None
+            return self._make_change(
+                event_key=event_key,
+                earthquake_no=display_no,
+                kind="revision",
+                provider="exptech",
+                old=old_snapshot,
+                new=snapshot,
+                web=web,
+                old_source="ExpTech v2",
+                new_source="ExpTech v2",
+            )
+
+        if matched_existing and cwa_row is not None:
+            cwa_snapshot = self._normalize_snapshot(json.loads(cwa_row[0]))
+            if cwa_snapshot != snapshot:
+                return self._make_change(
+                    event_key=event_key,
+                    earthquake_no=display_no,
+                    kind="difference",
+                    provider="exptech",
+                    old=cwa_snapshot,
+                    new=snapshot,
+                    web=web,
+                    old_source="CWA",
+                    new_source="ExpTech v2",
+                )
+        return None
+
+    def _current_source_differences(self):
+        changes = []
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
+            exptech_rows = connection.execute("""
+                SELECT earthquake_no, snapshot_json, report_json
+                FROM earthquake_reports WHERE source = ?
+            """, (EXPTECH_SOURCE,)).fetchall()
+            for event_key, snapshot_json, report_json in exptech_rows:
+                report = json.loads(report_json)
+                display_no = str(report.get("id", "未知")).split("-")[0]
+                cwa_row = self._cwa_row_for_event(connection, event_key, display_no)
+                if cwa_row is None:
+                    continue
+                cwa_snapshot = self._normalize_snapshot(json.loads(cwa_row[0]))
+                exptech_snapshot = self._normalize_snapshot(json.loads(snapshot_json))
+                if cwa_snapshot == exptech_snapshot:
+                    continue
+                changes.append(self._make_change(
+                    event_key=event_key,
+                    earthquake_no=display_no,
+                    kind="difference",
+                    provider="exptech",
+                    old=cwa_snapshot,
+                    new=exptech_snapshot,
+                    web=self._exptech_report_url(str(report.get("id", ""))),
+                    old_source="CWA",
+                    new_source="ExpTech v2",
+                ))
+        return changes
+
+    def _match_exptech_event(self, provider_id, display_no, snapshot):
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
+            alias = connection.execute("""
+                SELECT event_key FROM earthquake_event_aliases
+                WHERE provider = 'exptech' AND provider_event_id = ?
+            """, (provider_id,)).fetchone()
+            if alias:
+                self._exptech_claimed_event_keys = getattr(self, "_exptech_claimed_event_keys", set())
+                self._exptech_claimed_event_keys.add(alias[0])
+                return alias[0], True
+
+            if not display_no.endswith("000"):
+                event_key = f"report:{display_no}"
+                exists = connection.execute(
+                    "SELECT 1 FROM earthquake_event_state WHERE event_key = ?",
+                    (event_key,),
+                ).fetchone()
+                self._exptech_claimed_event_keys = getattr(self, "_exptech_claimed_event_keys", set())
+                self._exptech_claimed_event_keys.add(event_key)
+                return event_key, exists is not None
+
+            origin = self._parse_origin_time(snapshot["origin_time"])
+            lat = self._float(snapshot["latitude"])
+            lon = self._float(snapshot["longitude"])
+            candidates = []
+            if origin is not None and lat is not None and lon is not None:
+                for event_key, candidate_json in connection.execute("""
+                    SELECT event_key, snapshot_json FROM earthquake_event_state
+                    WHERE earthquake_no LIKE '%000'
+                """):
+                    candidate = self._normalize_snapshot(json.loads(candidate_json))
+                    candidate_time = self._parse_origin_time(candidate["origin_time"])
+                    candidate_lat = self._float(candidate["latitude"])
+                    candidate_lon = self._float(candidate["longitude"])
+                    if None in (candidate_time, candidate_lat, candidate_lon):
+                        continue
+                    seconds = abs((origin - candidate_time).total_seconds())
+                    distance = self._distance_km(lat, lon, candidate_lat, candidate_lon)
+                    claimed = getattr(self, "_exptech_claimed_event_keys", set())
+                    if seconds <= LOCAL_MATCH_SECONDS and distance <= LOCAL_MATCH_KM and event_key not in claimed:
+                        candidates.append(event_key)
+            if len(candidates) == 1:
+                self._exptech_claimed_event_keys = getattr(self, "_exptech_claimed_event_keys", set())
+                self._exptech_claimed_event_keys.add(candidates[0])
+                return candidates[0], True
+            if len(candidates) > 1:
+                logging.warning(
+                    "⚠️ [地震報告更新] ExpTech 小區域事件 %s 有 %d 個候選，不當作修訂。",
+                    provider_id,
+                    len(candidates),
+                )
+            event_key = f"exptech-local:{provider_id}"
+            self._exptech_claimed_event_keys = getattr(self, "_exptech_claimed_event_keys", set())
+            self._exptech_claimed_event_keys.add(event_key)
+            return event_key, False
+
+    @staticmethod
+    def _canonical_cwa_key(source, storage_key, display_no):
+        if source == LOCAL_EARTHQUAKE_DATASET:
+            return storage_key
+        return f"report:{display_no}"
+
+    @staticmethod
+    def _cwa_row_for_event(connection, event_key, display_no):
+        if event_key.startswith("report:"):
+            return connection.execute("""
+                SELECT snapshot_json FROM earthquake_reports
+                WHERE source = ? AND earthquake_no = ?
+            """, (API_DATASETS[0], display_no)).fetchone()
+        if event_key.startswith("local:"):
+            return connection.execute("""
+                SELECT snapshot_json FROM earthquake_reports
+                WHERE source = ? AND earthquake_no = ?
+            """, (LOCAL_EARTHQUAKE_DATASET, event_key)).fetchone()
+        return None
+
+    @staticmethod
+    def _write_canonical(connection, event_key, earthquake_no, snapshot, provider, web, now):
+        connection.execute("""
+            INSERT INTO earthquake_event_state
+                (event_key, earthquake_no, origin_time, snapshot_json, provider, web, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_key) DO UPDATE SET
+                earthquake_no = excluded.earthquake_no,
+                origin_time = excluded.origin_time,
+                snapshot_json = excluded.snapshot_json,
+                provider = excluded.provider,
+                web = excluded.web,
+                updated_at = excluded.updated_at
+        """, (
+            event_key,
+            earthquake_no,
+            snapshot["origin_time"],
+            json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+            provider,
+            web,
+            now,
+        ))
 
     @staticmethod
     def _event_key(source, report, snapshot):
-        """顯著有感報告使用 EarthquakeNo；小區域報告使用不含規模的發生秒數。"""
         if source != LOCAL_EARTHQUAKE_DATASET:
             return str(report.get("EarthquakeNo") or snapshot["origin_time"])
-
         web = str(report.get("Web") or "")
         match = re.search(r"/details/(\d{14})\d*", web)
         if match:
@@ -215,12 +579,11 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         return f"local:{origin.strftime('%Y%m%d%H%M%S')}" if origin else f"local:{snapshot['origin_time']}"
 
     @staticmethod
-    @staticmethod
     def _parse_origin_time(value):
         try:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
             return parsed.replace(tzinfo=TAIPEI_TZ) if parsed.tzinfo is None else parsed.astimezone(TAIPEI_TZ)
-        except ValueError:
+        except (TypeError, ValueError):
             try:
                 return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=TAIPEI_TZ)
             except ValueError:
@@ -240,6 +603,52 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             "origin_time": EarthquakeRevisionAlertCog._text(info.get("OriginTime")),
             "location": EarthquakeRevisionAlertCog._text(epicenter.get("Location")),
         }
+
+    @staticmethod
+    def _exptech_snapshot(report):
+        timestamp = report.get("time")
+        try:
+            origin_time = datetime.fromtimestamp(float(timestamp) / 1000, TAIPEI_TZ).isoformat(timespec="seconds")
+        except (TypeError, ValueError, OSError):
+            origin_time = "未知"
+        intensity_map = {
+            0: "0級", 1: "1級", 2: "2級", 3: "3級", 4: "4級",
+            5: "5弱", 6: "5強", 7: "6弱", 8: "6強", 9: "7級",
+        }
+        try:
+            intensity = intensity_map.get(int(report.get("int")), "未提供")
+        except (TypeError, ValueError):
+            intensity = "未提供"
+        return EarthquakeRevisionAlertCog._normalize_snapshot({
+            "intensity": intensity,
+            "magnitude": report.get("mag"),
+            "longitude": report.get("lon"),
+            "latitude": report.get("lat"),
+            "depth": report.get("depth"),
+            "origin_time": origin_time,
+            "location": report.get("loc"),
+        })
+
+    @staticmethod
+    def _normalize_snapshot(snapshot):
+        normalized = dict(snapshot)
+        for field in ("magnitude", "longitude", "latitude", "depth"):
+            normalized[field] = EarthquakeRevisionAlertCog._number_text(snapshot.get(field))
+        parsed = EarthquakeRevisionAlertCog._parse_origin_time(snapshot.get("origin_time"))
+        normalized["origin_time"] = parsed.isoformat(timespec="seconds") if parsed else EarthquakeRevisionAlertCog._text(snapshot.get("origin_time"))
+        normalized["location"] = re.sub(r"\s+", " ", EarthquakeRevisionAlertCog._text(snapshot.get("location"))).strip()
+        normalized["intensity"] = EarthquakeRevisionAlertCog._text(snapshot.get("intensity"))
+        return normalized
+
+    @staticmethod
+    def _number_text(value):
+        if value is None or value == "" or value == "未知":
+            return "未知"
+        try:
+            number = Decimal(str(value))
+            return format(number.normalize(), "f")
+        except (InvalidOperation, ValueError):
+            return str(value)
 
     @staticmethod
     def _text(value):
@@ -270,67 +679,143 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         return levels.get(str(value).replace("級", ""), -1.0)
 
     @staticmethod
-    def _origin_sort_key(value):
+    def _float(value):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
-        except ValueError:
-            try:
-                return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                return datetime.max
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
-    async def _send_revision_alerts(self, changes):
+    @staticmethod
+    def _distance_km(lat1, lon1, lat2, lon2):
+        radius = 6371.0
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        value = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+        value = min(max(value, 0.0), 1.0)
+        return radius * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+
+    @staticmethod
+    def _origin_sort_key(value):
+        parsed = EarthquakeRevisionAlertCog._parse_origin_time(value)
+        return parsed or datetime.max.replace(tzinfo=TAIPEI_TZ)
+
+    @staticmethod
+    def _exptech_report_url(provider_id):
+        if not provider_id:
+            return None
+        parts = provider_id.split("-")
+        if len(parts) < 4:
+            return None
+        report_id = f"{parts[0]}-{parts[2]}-{parts[3]}"
+        return f"https://www.cwa.gov.tw/V8/C/E/EQ/EQ{report_id}.html"
+
+    @staticmethod
+    def _make_change(
+        *, event_key, earthquake_no, kind, provider, old, new, web,
+        old_source, new_source, version_material=None,
+    ):
+        material = version_material or json.dumps(
+            {"kind": kind, "old": old, "new": new}, ensure_ascii=False, sort_keys=True
+        )
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        return {
+            "event_key": event_key,
+            "earthquake_no": earthquake_no,
+            "kind": kind,
+            "provider": provider,
+            "old": old,
+            "new": new,
+            "old_source": old_source,
+            "new_source": new_source,
+            "web": web,
+            "notification_hash": digest,
+        }
+
+    @staticmethod
+    def _unique_changes(changes):
+        unique = {}
+        for change in changes:
+            unique[(change["event_key"], change["notification_hash"])] = change
+        return list(unique.values())
+
+    async def _send_revision_alerts(self, changes, target_guild_id=None):
         async with self._send_lock:
-            targets, unavailable = self._configured_channels()
-            if not targets:
-                logging.info("ℹ️ [地震報告更新] 偵測到 %d 筆修正，但沒有可用的推送頻道。", len(changes))
-                return
-
+            targets, unavailable = self._configured_channels(target_guild_id)
             sent_count = 0
+            notified_guilds = set()
             failed_channels = dict(unavailable)
-            active_targets = dict(targets)
-            # 外層以地震排序，確保每個頻道收到的訊息順序都是發生時間由早到晚。
+
             for change in changes:
                 embed = self._build_embed(
-                    change["old"], change["new"], change["earthquake_no"],
+                    change["old"],
+                    change["new"],
+                    change["earthquake_no"],
                     change.get("web"),
+                    kind=change["kind"],
+                    old_source=change["old_source"],
+                    new_source=change["new_source"],
                 )
-                for channel_id, channel in tuple(active_targets.items()):
-                    try:
-                        await self._send_with_rate_limit(channel_id, channel, embed)
-                        sent_count += 1
-                    except (discord.Forbidden, discord.HTTPException) as error:
-                        # 同一個失效頻道只記錄一次，後續訊息不再反覆嘗試或洗 Log。
-                        active_targets.pop(channel_id, None)
-                        failed_channels[channel_id] = self._error_summary(error)
+                for guild_id, channels in targets.items():
+                    if change["provider"] == "exptech" and not self._guild_uses_exptech(guild_id):
+                        continue
+                    if self._notification_exists(guild_id, change):
+                        continue
+                    guild_sent = False
+                    for channel_id, channel in tuple(channels.items()):
+                        try:
+                            await self._send_with_rate_limit(channel_id, channel, embed, change["kind"])
+                            sent_count += 1
+                            guild_sent = True
+                        except (discord.Forbidden, discord.HTTPException) as error:
+                            channels.pop(channel_id, None)
+                            failed_channels[channel_id] = self._error_summary(error)
+                    if guild_sent:
+                        self._mark_notification(guild_id, change)
+                        notified_guilds.add(guild_id)
 
-            logging.info(
-                "✅ [地震報告更新] 已完成 %d 筆修正、%d 則 Discord 推送（%d 個頻道）。",
-                len(changes), sent_count, len(targets),
-            )
             if failed_channels:
                 failures = "；".join(f"{channel_id}：{reason}" for channel_id, reason in failed_channels.items())
                 logging.warning("⚠️ [地震報告更新] 略過無法推送的頻道：%s", failures)
+            return {"sent": sent_count, "guilds": len(notified_guilds)}
 
-    def _configured_channels(self):
+    def _configured_channels(self, target_guild_id=None):
         targets = {}
         unavailable = {}
-        for guild_settings in self._load_settings().values():
+        for guild_id, guild_settings in self._load_settings().items():
+            guild_id = str(guild_id)
+            if target_guild_id is not None and guild_id != str(target_guild_id):
+                continue
             if not guild_settings.get("report_revision_enabled", False):
                 continue
+            guild_targets = {}
             for raw_channel_id in guild_settings.get("report_revision_channel_ids", []):
                 channel_id = int(raw_channel_id)
-                if channel_id in targets or channel_id in unavailable:
-                    continue
                 channel = self.bot.get_channel(channel_id)
                 if channel is None:
                     unavailable[channel_id] = "找不到頻道"
                 else:
-                    targets[channel_id] = channel
+                    guild_targets[channel_id] = channel
+            if guild_targets:
+                targets[guild_id] = guild_targets
         return targets, unavailable
 
-    async def _send_with_rate_limit(self, channel_id, channel, embed):
-        """以頻道與全域節流傳送，若 Discord 仍回 429 則等待後重試。"""
+    def _notification_exists(self, guild_id, change):
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
+            return connection.execute("""
+                SELECT 1 FROM earthquake_report_notifications
+                WHERE guild_id = ? AND event_key = ? AND notification_hash = ?
+            """, (str(guild_id), change["event_key"], change["notification_hash"])).fetchone() is not None
+
+    def _mark_notification(self, guild_id, change):
+        with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
+            connection.execute("""
+                INSERT OR IGNORE INTO earthquake_report_notifications
+                    (guild_id, event_key, notification_hash, notified_at)
+                VALUES (?, ?, ?, ?)
+            """, (str(guild_id), change["event_key"], change["notification_hash"], self._now()))
+
+    async def _send_with_rate_limit(self, channel_id, channel, embed, kind="revision"):
         now = clock.monotonic()
         wait_time = max(
             self._last_channel_send.get(channel_id, 0.0) + CHANNEL_SEND_INTERVAL - now,
@@ -339,10 +824,10 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         )
         if wait_time:
             await asyncio.sleep(wait_time)
-
+        content = "地震報告來源資料差異" if kind == "difference" else "地震報告更新"
         for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
             try:
-                await channel.send(content="地震報告更新", embed=embed)
+                await channel.send(content=content, embed=embed)
                 sent_at = clock.monotonic()
                 self._last_channel_send[channel_id] = sent_at
                 self._last_global_send = sent_at
@@ -359,6 +844,16 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             return "權限不足"
         return f"Discord HTTP {getattr(error, 'status', '錯誤')}"
 
+    def _any_guild_uses_exptech(self):
+        return any(
+            settings.get("report_revision_exptech_enabled", False)
+            for settings in self._load_settings().values()
+        )
+
+    def _guild_uses_exptech(self, guild_id):
+        settings = self._load_settings().get(str(guild_id), {})
+        return settings.get("report_revision_exptech_enabled", False)
+
     @staticmethod
     def _load_settings():
         try:
@@ -368,10 +863,15 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             return {}
 
     @staticmethod
-    def _build_embed(old, new, earthquake_no, report_url=None):
+    def _build_embed(
+        old, new, earthquake_no, report_url=None, *, kind="revision",
+        old_source="CWA", new_source="CWA",
+    ):
         def pair(field, formatter=lambda value: value):
             old_value = formatter(old[field])
             new_value = formatter(new[field])
+            if kind == "difference":
+                return f"{old_source} {old_value}\n{new_source} {new_value}"
             return f"不變 {old_value}" if old_value == new_value else f"舊 {old_value}\n新 {new_value}"
 
         def longitude(value): return value if value == "未知" else f"{value}°E"
@@ -382,7 +882,7 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             value = str(value)
             return value if value == "未知" or value.endswith(("級", "弱", "強")) else f"{value}級"
 
-        report_type = EarthquakeRevisionAlertCog._report_type(earthquake_no)
+        report_type = EarthquakeRevisionAlertCog._report_type(earthquake_no, kind)
         description = f"[地震報告網址]({report_url})" if report_url else None
         embed = discord.Embed(title=report_type, description=description, color=0x3A3A44)
         embed.add_field(name="地震報告編號", value=str(earthquake_no), inline=False)
@@ -393,26 +893,30 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         embed.add_field(name="緯度", value=pair("latitude", latitude), inline=True)
         embed.add_field(name="經度", value=pair("longitude", longitude), inline=True)
         embed.add_field(name="時間", value=pair("origin_time"), inline=False)
-        embed.set_footer(text="資訊請以中央氣象署為準")
+        source_text = f"比對來源：{old_source} → {new_source}｜" if kind == "difference" else f"資料來源：{new_source}｜"
+        embed.set_footer(text=f"{source_text}資訊請以中央氣象署為準")
         return embed
 
     @staticmethod
     def _display_location(value):
-        """通知只顯示 CWA 位置文字中括號內的震央地名。"""
         if value == "未知":
             return value
         match = re.search(r"[（(]\s*位於\s*([^）)]+?)\s*[）)]", str(value))
         return match.group(1).strip() if match else str(value)
 
     @staticmethod
-    def _report_type(earthquake_no):
-        """依 CWA 報告編號尾碼標示小區域或遠地有感地震。"""
+    def _report_type(earthquake_no, kind="revision"):
         suffix = str(earthquake_no)[-6:]
+        ending = "來源資料差異" if kind == "difference" else "更新"
         if suffix.endswith("000"):
-            return "小區域地震報告更新"
+            return f"小區域地震報告{ending}"
         if suffix.endswith("999"):
-            return "遠地有感地震報告更新"
-        return "地震報告更新"
+            return f"遠地有感地震報告{ending}"
+        return f"地震報告{ending}"
+
+    @staticmethod
+    def _now():
+        return datetime.now(TAIPEI_TZ).isoformat(timespec="seconds")
 
 
 async def setup(bot):

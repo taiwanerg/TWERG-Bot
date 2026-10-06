@@ -43,6 +43,8 @@ class SettingsOverviewView(discord.ui.View):
         earlyest_status = "`🟢` 已啟用" if self.settings.get("earlyest_monitor_enabled") else "`🔴` 已停用"
         auto_pub_status = "`🟢` 已啟用" if self.settings.get("auto_publish_news") else "`🔴` 已停用"
         revision_status = "`🟢` 已啟用" if self.settings.get("report_revision_enabled") else "`🔴` 已停用"
+        if self.settings.get("report_revision_exptech_enabled", False):
+            revision_status += "（ExpTech v2 補強）"
         
         embed.add_field(name="⚙️ TWERG 體感回報設定", value=eq_status, inline=False)
         embed.add_field(name="🖥️ YouTube 直播監控", value=yt_status, inline=False)
@@ -580,17 +582,24 @@ class EarthquakeRevisionSettingsView(discord.ui.View):
         self.settings = self.all_settings.setdefault(self.guild_id, {})
         self.settings.setdefault("report_revision_enabled", False)
         self.settings.setdefault("report_revision_channel_ids", [])
+        self.settings.setdefault("report_revision_exptech_enabled", False)
 
     def build_embed(self) -> discord.Embed:
         embed = discord.Embed(
             title="`📝` 地震報告更新推送設定",
-            description="每天上午 8 點與下午 8 點同步中央氣象署的顯著有感、小區域有感地震報告；資料重新定位或測算後才會通知。",
+            description=(
+                "每天上午 8 點與下午 8 點同步地震報告。CWA API 固定啟用；"
+                "可額外啟用 ExpTech v2 比對開放資料未及時反映的數值。"
+            ),
             color=0x3A3A44,
         )
         status = "`🟢` 已啟用" if self.settings["report_revision_enabled"] else "`🔴` 已停用"
+        exptech_status = "`🟢` 已啟用" if self.settings["report_revision_exptech_enabled"] else "`🔴` 已停用"
         channel_ids = self.settings["report_revision_channel_ids"]
         channels = "\n".join(f"<#{channel_id}>" for channel_id in channel_ids) if channel_ids else "⚠️ 尚未設定"
         embed.add_field(name="推送狀態", value=status, inline=False)
+        embed.add_field(name="CWA API", value="`🟢` 固定啟用", inline=True)
+        embed.add_field(name="ExpTech v2 補強", value=exptech_status, inline=True)
         embed.add_field(name="推送目標頻道列表", value=channels, inline=False)
         return embed
 
@@ -601,13 +610,46 @@ class EarthquakeRevisionSettingsView(discord.ui.View):
         save_settings(self.all_settings)
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
+    @discord.ui.button(label="切換 ExpTech v2 補強", style=discord.ButtonStyle.primary, row=1)
+    async def toggle_exptech(self, interaction: discord.Interaction, button: discord.ui.Button):
+        enabled = not self.settings.get("report_revision_exptech_enabled", False)
+        self.settings["report_revision_exptech_enabled"] = enabled
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+
+        if not enabled:
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            return
+
+        # Component defer keeps the ephemeral settings message editable while
+        # the two upstream APIs are being reconciled.
+        await interaction.response.defer()
+        summary = None
+        cog = interaction.client.get_cog("EarthquakeRevisionAlertCog")
+        if cog is None:
+            summary = "⚠️ ExpTech v2 已啟用，但地震報告同步模組尚未就緒，將於下次排程再嘗試。"
+        else:
+            try:
+                result = await cog.enable_exptech_for_guild(self.guild_id)
+                summary = (
+                    f"✅ ExpTech v2 已啟用：找到 {result['differences']} 筆來源資料差異、"
+                    f"{result['revisions']} 筆已確認修訂，送出 {result['sent']} 則頻道通知。"
+                )
+                if result["errors"]:
+                    summary += "\n⚠️ " + "；".join(result["errors"])
+            except Exception as error:
+                summary = f"⚠️ ExpTech v2 已啟用，但首次同步失敗：{error}"
+
+        await interaction.edit_original_response(embed=self.build_embed(), view=self)
+        await interaction.followup.send(summary, ephemeral=True)
+
     @discord.ui.select(
         cls=discord.ui.ChannelSelect,
         channel_types=[discord.ChannelType.text],
         placeholder="選擇更新推送頻道 (可多選，將覆蓋原設定)",
         min_values=0,
         max_values=25,
-        row=1,
+        row=2,
     )
     async def select_channels(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         self.settings["report_revision_channel_ids"] = [channel.id for channel in select.values]
@@ -615,12 +657,12 @@ class EarthquakeRevisionSettingsView(discord.ui.View):
         save_settings(self.all_settings)
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    @discord.ui.button(label="返回概覽", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="返回概覽", style=discord.ButtonStyle.secondary, row=3)
     async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = SettingsOverviewView(self.guild_id)
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
-    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=2)
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=3)
     async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="✅ **設定已儲存**", embed=self.build_embed(), view=None)
         self.stop()
