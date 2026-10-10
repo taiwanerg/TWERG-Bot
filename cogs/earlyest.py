@@ -15,6 +15,14 @@ EARLYEST_HYPOLIST_URL = urljoin(EARLYEST_BASE_URL, "hypolist.html")
 EARLYEST_HYPOMESSAGE_URL = urljoin(EARLYEST_BASE_URL, "hypomessage.html")
 EARLYEST_IMAGE_URL = urljoin(EARLYEST_BASE_URL, "t50.jpg")
 
+MAGNITUDE_COLORS = (
+    (8.0, 0xB319FA),
+    (7.0, 0xF51111),
+    (6.0, 0xE67E22),
+    (5.0, 0xF5D611),
+)
+DEFAULT_MAGNITUDE_COLOR = 0x1173F2
+
 
 def _clean_text(value: str) -> str:
     return " ".join(value.replace("\xa0", " ").split())
@@ -100,6 +108,22 @@ def best_magnitude(record):
     return "M", "-"
 
 
+def magnitude_color(record):
+    """Choose an embed color using the largest usable magnitude solution."""
+    magnitudes = [
+        number
+        for key in ("mb", "mwp", "mwpd")
+        if (number := _parse_float(record.get(key, ""))) is not None
+        and number > -8
+    ]
+    largest_magnitude = max(magnitudes, default=None)
+    if largest_magnitude is not None:
+        for minimum, color in MAGNITUDE_COLORS:
+            if largest_magnitude >= minimum:
+                return color
+    return DEFAULT_MAGNITUDE_COLOR
+
+
 def parse_event_table(html, limit=None):
     """Parse Early-est hypolist/hypomessage rows into normalized records."""
     parser = _EventTableParser()
@@ -182,7 +206,7 @@ def build_event_embed(record, image_url=None):
         title="Early-est 地震報告",
         url=record.get("event_url") or EARLYEST_WARNING_URL,
         description=record.get("region") or "未知地區",
-        color=0xE67E22,
+        color=magnitude_color(record),
     )
 
     origin_time = record.get("origin_time")

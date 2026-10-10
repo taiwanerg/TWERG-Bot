@@ -1,7 +1,9 @@
+import asyncio
 import io
 import json
 import logging
 
+import aiohttp
 import discord
 from discord.ext import commands, tasks
 
@@ -13,6 +15,16 @@ from cogs.earlyest import (
     build_event_embed,
     parse_event_table,
 )
+
+
+EARLYEST_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
+    total=20,
+    connect=10,
+    sock_connect=10,
+    sock_read=15,
+)
+EARLYEST_FETCH_ATTEMPTS = 3
+EARLYEST_RETRY_DELAYS = (2, 5)
 
 
 class EarlyEstAutoPushCog(commands.Cog):
@@ -128,19 +140,45 @@ class EarlyEstAutoPushCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def fetch_active_events(self):
-        async with self.bot.session.get(EARLYEST_HYPOMESSAGE_URL) as response:
-            if response.status != 200:
-                logging.warning(
-                    "⚠️ [Early-est 推送] 無法取得即時事件，狀態碼：%s",
-                    response.status,
+        for attempt in range(1, EARLYEST_FETCH_ATTEMPTS + 1):
+            try:
+                async with self.bot.session.get(
+                    EARLYEST_HYPOMESSAGE_URL,
+                    timeout=EARLYEST_REQUEST_TIMEOUT,
+                ) as response:
+                    if response.status != 200:
+                        logging.warning(
+                            "⚠️ [Early-est 推送] 無法取得即時事件，狀態碼：%s",
+                            response.status,
+                        )
+                        return None
+                    raw_bytes = await response.read()
+                return parse_event_table(raw_bytes.decode("utf-8", errors="ignore"))
+            except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+                if attempt == EARLYEST_FETCH_ATTEMPTS:
+                    logging.warning(
+                        "⚠️ [Early-est 推送] 連線失敗，已嘗試 %s 次：%s",
+                        attempt,
+                        error,
+                    )
+                    return None
+
+                delay = EARLYEST_RETRY_DELAYS[attempt - 1]
+                logging.info(
+                    "⏳ [Early-est 推送] 連線失敗（第 %s/%s 次），%s 秒後重試：%s",
+                    attempt,
+                    EARLYEST_FETCH_ATTEMPTS,
+                    delay,
+                    error,
                 )
-                return None
-            raw_bytes = await response.read()
-        return parse_event_table(raw_bytes.decode("utf-8", errors="ignore"))
+                await asyncio.sleep(delay)
 
     async def fetch_dashboard_image(self):
         try:
-            async with self.bot.session.get(EARLYEST_IMAGE_URL) as response:
+            async with self.bot.session.get(
+                EARLYEST_IMAGE_URL,
+                timeout=EARLYEST_REQUEST_TIMEOUT,
+            ) as response:
                 if response.status != 200:
                     logging.warning(
                         "⚠️ [Early-est 推送] 無法下載 t50.jpg，狀態碼：%s",

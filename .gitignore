@@ -12,3 +12,4 @@ guild_settings.json
 /data/.matplotlib/
 /tests/*
 !/tests/test_earthquake_revision.py
+/tests
