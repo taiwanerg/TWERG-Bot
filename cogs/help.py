@@ -32,6 +32,7 @@ class HelpView(discord.ui.View):
         embed_owner.add_field(name="/leave", value="🚪 強制退出指定的伺服器", inline=False)
         embed_owner.add_field(name="/broadcast", value="📢 對所有開啟自動推送的伺服器發送廣播", inline=False)
         embed_owner.add_field(name="/kma_token", value="🔑 設定韓國氣象廳 (KMA) 資料連線 Token（不需重啟）", inline=False)
+        embed_owner.add_field(name="/kma_backup", value="🛡️ 設定韓國地震備援伺服器網址，留空即停用（不需重啟）", inline=False)
         embed_owner.add_field(name="/shutdown", value="🛑 關閉 BOT", inline=False)
         embed_owner.add_field(name="/restart", value="🔄 重新啟動機器人", inline=False)
 
@@ -84,6 +85,15 @@ class HelpView(discord.ui.View):
                 "`/settings` → 韓國地震 → 「斷線通知設定」\n"
                 "連線中斷超過 60 秒會通知並附上原因，可 tag 指定的人或身分組\n"
                 "設定後可按「發送測試通知」確認頻道與 tag 是否正確"
+            ),
+            inline=False,
+        )
+        embed_kma.add_field(
+            name="🛡️ 強化伺服器穩定性（選用）",
+            value=(
+                "擁有者以 `/kma_backup` 設定備援伺服器後，`/settings` → 韓國地震 會出現此按鈕\n"
+                "開啟後同時接收主要與備援來源，任一來源先到就先推送，不會重複發送\n"
+                "-# 未設定備援伺服器時不會顯示此按鈕"
             ),
             inline=False,
         )

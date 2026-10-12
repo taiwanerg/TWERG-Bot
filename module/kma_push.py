@@ -81,12 +81,14 @@ def mention_roles(kind, event, settings):
     return roles if minimum > 0 and level >= minimum else []
 
 
-def targets(kind, event):
+def targets(kind, event, source="primary", exclude=()):
     result = []
-    seen = set()
+    seen = {int(c) for c in exclude}
     magnitude = event.get("magnitude")
     for guild_id, settings in load_guild_settings().items():
         if not settings.get(f"kma_{kind}_enabled", False):
+            continue
+        if source == "backup" and not settings.get("kma_backup_enabled", False):
             continue
         if kind == "report":
             try:
@@ -97,11 +99,56 @@ def targets(kind, event):
                 continue
         roles = mention_roles(kind, event, settings)
         for channel_id in settings.get(f"kma_{kind}_channel_ids", []):
-            if channel_id in seen:
+            if int(channel_id) in seen:
                 continue
-            seen.add(channel_id)
+            seen.add(int(channel_id))
             result.append({"channel_id": int(channel_id), "roles": roles})
     return result
+
+
+def signature(event):
+    def rounded(value, digits):
+        return round(value, digits) if isinstance(value, (int, float)) else None
+
+    return [
+        event.get("mode"),
+        rounded(event.get("magnitude"), 1),
+        rounded(event.get("depth"), 0),
+        event.get("max_level"),
+        rounded(event.get("lat"), 2),
+        rounded(event.get("lon"), 2),
+    ]
+
+
+def signature_changed(old, new):
+    if not old:
+        return False
+    old_mode, old_mag, old_depth, old_level, old_lat, old_lon = (list(old) + [None] * 6)[:6]
+    new_mode, new_mag, new_depth, new_level, new_lat, new_lon = (list(new) + [None] * 6)[:6]
+    if old_mode != new_mode or old_mag != new_mag or old_level != new_level:
+        return True
+    if old_depth is not None and new_depth is not None and abs(old_depth - new_depth) >= 1:
+        return True
+    for a, b in ((old_lat, new_lat), (old_lon, new_lon)):
+        if a is not None and b is not None and abs(a - b) > 0.05:
+            return True
+    return False
+
+
+def has_backup(record):
+    return any(str(tag).startswith("backup:") for tag in record.get("ids", []))
+
+
+def record_digests(record):
+    digests = record.setdefault("digests", {})
+    if "primary" not in digests and record.get("md5"):
+        digests["primary"] = record["md5"]
+    return digests
+
+
+def doc_digest(doc):
+    raw = json.dumps(doc, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 def channel_settings(kind):
@@ -170,6 +217,38 @@ def normalize_report(data):
         "max_level": level,
         "max_area": [],
     }
+
+
+def _backup_base(doc):
+    place = doc.get("location") or ""
+    level = _num(doc.get("maxIntensityScale"))
+    return {
+        "id": str(doc.get("id")),
+        "magnitude": _num(doc.get("magnitude")),
+        "depth": _num(doc.get("depthKm")),
+        "lat": _num(doc.get("latitude")),
+        "lon": _num(doc.get("longitude")),
+        "place_ko": place,
+        "place_zh": kma_text.place_zh(place),
+        "origin": kma_text.parse_iso(doc.get("occurredAt")),
+        "issued": kma_text.parse_iso(doc.get("announcedAt")) or kma_text.parse_iso(doc.get("occurredAt")),
+        "max_level": int(level) if level else parse_level(doc.get("maxIntensity")),
+    }
+
+
+def normalize_backup_eew(doc, mode):
+    event = _backup_base(doc)
+    area = doc.get("maxIntensityAreas") or []
+    if isinstance(area, str):
+        area = [area]
+    event.update({"mode": mode, "max_area": [str(a) for a in area]})
+    return event
+
+
+def normalize_backup_report(doc):
+    event = _backup_base(doc)
+    event.update({"mode": "지진정보", "max_area": []})
+    return event
 
 
 async def prepare(event, mode_key, stations=None):
