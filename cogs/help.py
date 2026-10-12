@@ -23,13 +23,15 @@ class HelpView(discord.ui.View):
         embed_general.add_field(name="/yt", value="🖥️ 查詢 台灣地震監視 YouTube 直播觀看人數", inline=False)
         
         embed_admin = discord.Embed(title="管理員指令", color=0xff3846, description="需要管理員權限才能使用的指令")
-        embed_admin.add_field(name="/settings", value="⚙️ 顯示或修改機器人的設定", inline=False)
+        embed_admin.add_field(name="/settings", value="⚙️ 顯示或修改機器人的設定\n-# 含 🇰🇷 韓國地震 (KMA)：預警／報告推送頻道、警報 tag 身分組、斷線通知", inline=False)
+        embed_admin.add_field(name="/kma_status", value="🇰🇷 查看韓國氣象廳 (KMA) 預警／報告／測站連線狀態", inline=False)
         embed_admin.add_field(name="/sync_earthquake_reports", value="🔄 依 `/settings` 資料來源設定手動同步地震報告", inline=False)
         
         embed_owner = discord.Embed(title="擁有者指令", color=0x9b59b6, description="僅限機器人擁有者使用的指令")
         embed_owner.add_field(name="/guilds", value="🤖 顯示機器人加入的伺服器列表與活躍狀態", inline=False)
         embed_owner.add_field(name="/leave", value="🚪 強制退出指定的伺服器", inline=False)
         embed_owner.add_field(name="/broadcast", value="📢 對所有開啟自動推送的伺服器發送廣播", inline=False)
+        embed_owner.add_field(name="/kma_token", value="🔑 設定韓國氣象廳 (KMA) 資料連線 Token（不需重啟）", inline=False)
         embed_owner.add_field(name="/shutdown", value="🛑 關閉 BOT", inline=False)
         embed_owner.add_field(name="/restart", value="🔄 重新啟動機器人", inline=False)
 

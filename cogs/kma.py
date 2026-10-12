@@ -209,10 +209,11 @@ class KMACog(commands.Cog):
             return
         await interaction.response.send_modal(KMATokenModal(self))
 
-    @app_commands.command(name="kma_status", description="（限擁有者）查看 KMA 資料連線狀態")
+    @app_commands.command(name="kma_status", description="（限管理員）查看韓國氣象廳 KMA 資料連線狀態")
     async def kma_status(self, interaction: discord.Interaction):
-        if not is_owner(interaction.user.id):
-            await interaction.response.send_message("❌ 你沒有權限使用此指令。", ephemeral=True)
+        is_admin = isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator
+        if not (is_owner(interaction.user.id) or is_admin):
+            await interaction.response.send_message("❌ 此指令僅限伺服器管理員或機器人擁有者使用。", ephemeral=True)
             return
         embed = discord.Embed(title="`🇰🇷` KMA 連線狀態", color=0x003478)
         embed.add_field(name="Token", value=f"`{mask_token(load_token())}`", inline=False)

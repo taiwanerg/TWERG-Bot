@@ -31,7 +31,7 @@ Its main purpose is to automatically push [TWERG "Did You Feel It?"](https://www
 - 即時接收韓國氣象廳（기상청）的지진조기경보／지진속보與지진정보，自動推送附地圖的訊息到指定頻道；預警與報告可分別設定頻道，報告可設定最低規模。
 - 預警地圖以시군구為單位顯示 TWERG 推算的預估震度（以 KMA 官方最大震度校正）；報告地圖優先使用 KMA 即時測站的實測最大值，無測站資料時改用推估並標示。
 - 震度配色採用 KMA 官方 MMI 色階，並以羅馬數字輔助辨識。同一預警的後續報會直接編輯原訊息。
-- 管理員在 `/settings` →「韓國地震 (KMA) 推送」設定；擁有者可用 `/kma_token` 設定資料連線 Token、`/kma_status` 查看連線狀態。
+- 管理員在 `/settings` →「韓國地震 (KMA) 推送」設定，並可用 `/kma_status` 查看連線狀態；擁有者可用 `/kma_token` 更換資料連線 Token（不需重啟）。
 - 警報 tag：預警／報告可分別指定要 tag 的身分組。預設依韓國災難簡訊規則（지진조기경보一律、지진속보最大預估震度 Ⅴ 以上），後續報升級時另發 tag 訊息。
 - 斷線通知：任一 KMA 資料連線中斷超過 60 秒，通知指定頻道並 tag 指定的人或身分組，附中斷原因；可設定僅一次或每 10 分鐘提醒（最多 6 次），恢復時另行通知。
 - Receives KMA EEW and earthquake information in real time and pushes map cards (Korean first, Chinese secondary) to configured channels.
@@ -76,7 +76,7 @@ pip install discord.py geopandas matplotlib shapely pillow
 "GUILD_IDS": (選填) Discord 伺服器 ID 列表。用於即時同步斜線指令，若留空則會進行全域同步 (會等到天荒地老)
 "YT_VIDEO_ID": 要監控的 YouTube 直播 ID （watch?v= 後面那一串英文），未填寫則 /yt 指令不可用
 "DYFI_CHANNEL_ID": 偵測 Discord 訊息的頻道網址，若不將 Discord 頻道的訊息回報納入統計與地圖中，可不填寫
-"KMA_WS_TOKEN": (選填) WHEWS API 的 WebSocket Token（wat_ 開頭，於 https://auth.beecld.com 申請），用於韓國地震功能；也可啟動後以 /kma_token 設定
+"KMA_WS_TOKEN": WHEWS API 的 WebSocket Token（wat_ 開頭，於 https://auth.beecld.com 申請）。韓國地震功能必填，未填寫則韓國預警與報告不會運作；也可啟動後以 /kma_token 設定
 ```
 
 ### 執行 (Run the bot)
