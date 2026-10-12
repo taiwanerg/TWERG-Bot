@@ -55,7 +55,7 @@ class KMAEEWAlertCog(commands.Cog):
                 logging.info(f"🔄 [KMA 預警] 略過過期資料 {event_id}（{event.get('place_ko')}）")
                 return
             event["serial"] = 1
-            channels = kma_push.target_channels("eew", event.get("magnitude"))
+            channels = kma_push.targets("eew", event)
             if not channels:
                 self.state[event_id] = {"md5": md5, "serial": 1, "messages": [], "ts": time.time()}
                 kma_push.save_state("eew", self.state)
@@ -78,7 +78,15 @@ class KMAEEWAlertCog(commands.Cog):
         analysis, png = await kma_push.prepare(event, event["mode"])
         filename = f"kma_eew_{event_id}_{serial}.png"
         content, embed = kma_push.build_message(event, event["mode"], filename, analysis)
-        await kma_push.edit_messages(self.bot, record["messages"], content, embed, png, filename)
+        await kma_push.edit_messages(self.bot, record["messages"], content, embed, png, filename, kind="eew", event=event)
+        mode_zh = kma_push.MODE_ZH.get(event["mode"], "")
+        pinged = await kma_push.ping_upgrades(
+            self.bot, "eew", record["messages"], event,
+            f"{event['mode']} 제{serial}보 · 경보 기준 도달",
+            f"{mode_zh} 第{serial}報 已達提及標準",
+        )
+        if pinged:
+            kma_push.save_state("eew", self.state)
         logging.info(f"🚨 [KMA 預警] {event_id} 更新為第{serial}報，已編輯 {len(record['messages'])} 則訊息")
 
 

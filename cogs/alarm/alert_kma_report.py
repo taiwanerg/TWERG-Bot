@@ -124,7 +124,7 @@ class KMAReportAlertCog(commands.Cog):
                 self.state[event["id"]] = dict(base, messages=[])
                 kma_push.save_state("report", self.state)
                 return
-            channels = kma_push.target_channels("report", event.get("magnitude"))
+            channels = kma_push.targets("report", event)
             if not channels:
                 self.state[event["id"]] = dict(base, messages=[])
                 kma_push.save_state("report", self.state)
@@ -147,7 +147,11 @@ class KMAReportAlertCog(commands.Cog):
         analysis, png = await kma_push.prepare(event, "지진정보", stations)
         filename = f"kma_report_{int(origin.timestamp())}_{int(time.time())}.png"
         content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
-        await kma_push.edit_messages(self.bot, record["messages"], content, embed, png, filename)
+        await kma_push.edit_messages(self.bot, record["messages"], content, embed, png, filename, kind="report", event=event)
+        if await kma_push.ping_upgrades(
+            self.bot, "report", record["messages"], event, "지진정보 갱신 · 진도 상향", "地震報告更新 · 震度上修",
+        ):
+            kma_push.save_state("report", self.state)
         logging.info(f"🔄 [KMA 報告] {key} 內容更新，已編輯 {len(record['messages'])} 則訊息")
 
     async def wait_observed(self, origin, max_level):

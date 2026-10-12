@@ -60,8 +60,31 @@ def load_guild_settings():
         return {}
 
 
-def target_channels(kind, magnitude):
+def mention_roles(kind, event, settings):
+    roles = [int(r) for r in settings.get(f"kma_{kind}_mention_role_ids", []) if str(r).isdigit()]
+    if not roles:
+        return []
+    level = event.get("max_level") or 0
+    if kind == "eew":
+        mode = settings.get("kma_eew_mention_mode", "kma")
+        if mode == "off":
+            return []
+        if mode == "all":
+            return roles
+        if mode == "warning":
+            return roles if event.get("mode") == "지진조기경보" else []
+        return roles if event.get("mode") == "지진조기경보" or level >= 5 else []
+    try:
+        minimum = int(settings.get("kma_report_mention_min_level", 0))
+    except (TypeError, ValueError):
+        minimum = 0
+    return roles if minimum > 0 and level >= minimum else []
+
+
+def targets(kind, event):
     result = []
+    seen = set()
+    magnitude = event.get("magnitude")
     for guild_id, settings in load_guild_settings().items():
         if not settings.get(f"kma_{kind}_enabled", False):
             continue
@@ -72,10 +95,29 @@ def target_channels(kind, magnitude):
                 threshold = 2.0
             if isinstance(magnitude, (int, float)) and magnitude < threshold:
                 continue
+        roles = mention_roles(kind, event, settings)
         for channel_id in settings.get(f"kma_{kind}_channel_ids", []):
-            if channel_id not in result:
-                result.append(channel_id)
+            if channel_id in seen:
+                continue
+            seen.add(channel_id)
+            result.append({"channel_id": int(channel_id), "roles": roles})
     return result
+
+
+def channel_settings(kind):
+    mapping = {}
+    for guild_id, settings in load_guild_settings().items():
+        for channel_id in settings.get(f"kma_{kind}_channel_ids", []):
+            mapping.setdefault(int(channel_id), settings)
+    return mapping
+
+
+def _mention_text(roles):
+    return " ".join(f"<@&{r}>" for r in roles)
+
+
+def _allowed(roles):
+    return discord.AllowedMentions(everyone=False, users=False, roles=[discord.Object(id=r) for r in roles])
 
 
 def _num(value):
@@ -256,34 +298,82 @@ def build_message(event, mode_key, filename, analysis):
     return content, embed
 
 
-async def send_to_channels(bot, channel_ids, content, embed, png, filename):
-    async def send_one(channel_id):
+async def send_to_channels(bot, target_list, content, embed, png, filename):
+    async def send_one(target):
+        channel_id, roles = target["channel_id"], target["roles"]
         channel = bot.get_channel(int(channel_id))
         if channel is None:
             logging.warning(f"⚠️ [KMA] 找不到頻道 {channel_id}")
             return None
+        text = f"{_mention_text(roles)}\n{content}" if roles else content
         try:
-            msg = await channel.send(content=content, embed=embed, file=discord.File(io.BytesIO(png), filename=filename))
-            return [channel.id, msg.id]
+            msg = await channel.send(
+                content=text, embed=embed, file=discord.File(io.BytesIO(png), filename=filename),
+                allowed_mentions=_allowed(roles),
+            )
+            return [channel.id, msg.id, bool(roles)]
         except discord.Forbidden:
             logging.error(f"❌ [KMA] 無法發送至頻道 {channel_id}：權限不足。")
         except Exception as e:
             logging.error(f"❌ [KMA] 發送至頻道 {channel_id} 失敗：{e}")
         return None
 
-    results = await asyncio.gather(*(send_one(c) for c in channel_ids))
+    results = await asyncio.gather(*(send_one(t) for t in target_list))
     return [r for r in results if r]
 
 
-async def edit_messages(bot, refs, content, embed, png, filename):
-    async def edit_one(ref):
-        channel_id, message_id = ref
-        channel = bot.get_channel(int(channel_id))
+async def ping_upgrades(bot, kind, refs, event, label_ko, label_zh):
+    mapping = channel_settings(kind)
+    changed = False
+
+    async def ping_one(ref):
+        nonlocal changed
+        if len(ref) > 2 and ref[2]:
+            return
+        settings = mapping.get(int(ref[0]))
+        if not settings:
+            return
+        roles = mention_roles(kind, event, settings)
+        if not roles:
+            return
+        channel = bot.get_channel(int(ref[0]))
         if channel is None:
             return
         try:
+            await channel.send(
+                content=f"🔔 {_mention_text(roles)}\n**{label_ko}**\n-# {label_zh}",
+                reference=discord.MessageReference(message_id=int(ref[1]), channel_id=int(ref[0]), fail_if_not_exists=False),
+                allowed_mentions=_allowed(roles),
+            )
+            if len(ref) > 2:
+                ref[2] = True
+            else:
+                ref.append(True)
+            changed = True
+        except Exception as e:
+            logging.error(f"❌ [KMA] 升級提及發送至頻道 {ref[0]} 失敗：{e}")
+
+    await asyncio.gather(*(ping_one(r) for r in refs))
+    return changed
+
+
+async def edit_messages(bot, refs, content, embed, png, filename, kind=None, event=None):
+    mapping = channel_settings(kind) if kind else {}
+
+    async def edit_one(ref):
+        channel_id, message_id = ref[0], ref[1]
+        channel = bot.get_channel(int(channel_id))
+        if channel is None:
+            return
+        text = content
+        if len(ref) > 2 and ref[2] and event is not None and int(channel_id) in mapping:
+            roles = [int(r) for r in mapping[int(channel_id)].get(f"kma_{kind}_mention_role_ids", []) if str(r).isdigit()]
+            if roles:
+                text = f"{_mention_text(roles)}\n{content}"
+        try:
             await channel.get_partial_message(int(message_id)).edit(
-                content=content, embed=embed, attachments=[discord.File(io.BytesIO(png), filename=filename)],
+                content=text, embed=embed, attachments=[discord.File(io.BytesIO(png), filename=filename)],
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.NotFound:
             logging.warning(f"⚠️ [KMA] 訊息 {message_id} 已不存在，略過更新。")

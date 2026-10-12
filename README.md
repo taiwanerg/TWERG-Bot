@@ -32,6 +32,8 @@ Its main purpose is to automatically push [TWERG "Did You Feel It?"](https://www
 - 預警地圖以시군구為單位顯示 TWERG 推算的預估震度（以 KMA 官方最大震度校正）；報告地圖優先使用 KMA 即時測站的實測最大值，無測站資料時改用推估並標示。
 - 震度配色採用 KMA 官方 MMI 色階，並以羅馬數字輔助辨識。同一預警的後續報會直接編輯原訊息。
 - 管理員在 `/settings` →「韓國地震 (KMA) 推送」設定；擁有者可用 `/kma_token` 設定資料連線 Token、`/kma_status` 查看連線狀態。
+- 警報 tag：預警／報告可分別指定要 tag 的身分組。預設依韓國災難簡訊規則（지진조기경보一律、지진속보最大預估震度 Ⅴ 以上），後續報升級時另發 tag 訊息。
+- 斷線通知：任一 KMA 資料連線中斷超過 60 秒，通知指定頻道並 tag 指定的人或身分組，附中斷原因；可設定僅一次或每 10 分鐘提醒（最多 6 次），恢復時另行通知。
 - Receives KMA EEW and earthquake information in real time and pushes map cards (Korean first, Chinese secondary) to configured channels.
 
 ### 即時查詢 Real-time Query
