@@ -26,6 +26,14 @@ Its main purpose is to automatically push [TWERG "Did You Feel It?"](https://www
 - 所有人都能使用 `/earthquake_report_update` 輸入地震編號，查詢 2026/10/06 起由機器人記錄的顯著有感地震報告新舊資料；不提供小區域及遠地有感地震查詢。
 - At 08:00 and 20:00 (Taiwan time), synchronizes CWA significant and local earthquake reports. Administrators can optionally enable ExpTech v2 comparison in `/settings`; same-source revisions and first-seen cross-source differences are labeled separately.
 
+### 韓國地震預警與地震報告 Korea (KMA) EEW & Earthquake Reports
+
+- 即時接收韓國氣象廳（기상청）的지진조기경보／지진속보與지진정보，自動推送附地圖的訊息到指定頻道；預警與報告可分別設定頻道，報告可設定最低規模。
+- 預警地圖以시군구為單位顯示 TWERG 推算的預估震度（以 KMA 官方最大震度校正）；報告地圖優先使用 KMA 即時測站的實測最大值，無測站資料時改用推估並標示。
+- 震度配色採用 KMA 官方 MMI 色階，並以羅馬數字輔助辨識。同一預警的後續報會直接編輯原訊息。
+- 管理員在 `/settings` →「韓國地震 (KMA) 推送」設定；擁有者可用 `/kma_token` 設定資料連線 Token、`/kma_status` 查看連線狀態。
+- Receives KMA EEW and earthquake information in real time and pushes map cards (Korean first, Chinese secondary) to configured channels.
+
 ### 即時查詢 Real-time Query
 - 手動查詢最新一筆地震資料，以及 TWERG 體感回報網址。
 - Manually query the latest earthquake data.
@@ -66,6 +74,7 @@ pip install discord.py geopandas matplotlib shapely pillow
 "GUILD_IDS": (選填) Discord 伺服器 ID 列表。用於即時同步斜線指令，若留空則會進行全域同步 (會等到天荒地老)
 "YT_VIDEO_ID": 要監控的 YouTube 直播 ID （watch?v= 後面那一串英文），未填寫則 /yt 指令不可用
 "DYFI_CHANNEL_ID": 偵測 Discord 訊息的頻道網址，若不將 Discord 頻道的訊息回報納入統計與地圖中，可不填寫
+"KMA_WS_TOKEN": (選填) WHEWS API 的 WebSocket Token（wat_ 開頭，於 https://auth.beecld.com 申請），用於韓國地震功能；也可啟動後以 /kma_token 設定
 ```
 
 ### 執行 (Run the bot)
@@ -106,3 +115,7 @@ If you encounter any issues, please contact the BOT author.
 GNU Affero General Public License
 
 另外，本專案字體選用 HarmonyOS Sans，未有進行額外修改，遵循華為官方免費商用授權協議。
+
+韓國地震地圖使用 [Pretendard](https://github.com/orioncactus/pretendard)（SIL Open Font License 1.1，見 `fonts/Pretendard-LICENSE.txt`）。
+
+韓國行政區界資料：본 데이터는 통계청 통계지리정보서비스(SGIS, https://sgis.kostat.go.kr)에서 공공누리 제1유형으로 개방한 행정동 경계를 가공한 것이며(가공: vuski/admdongkor, https://github.com/vuski/admdongkor), CC BY 4.0으로 배포됩니다. 周邊國家海岸線來自 Natural Earth（公有領域）。地震資料來自韓國氣象廳（KMA），經 WHEWS API 取得。
