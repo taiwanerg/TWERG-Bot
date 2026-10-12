@@ -130,9 +130,9 @@ class KMAReportAlertCog(commands.Cog):
                 kma_push.save_state("report", self.state)
                 return
             stations = await self.wait_observed(origin, event.get("max_level"))
-            png = await kma_push.render_png(event, "지진정보", stations)
+            analysis, png = await kma_push.prepare(event, "지진정보", stations)
             filename = f"kma_report_{int(origin.timestamp())}.png"
-            content, embed = kma_push.build_message(event, "지진정보", filename, observed=bool(stations))
+            content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
             refs = await kma_push.send_to_channels(self.bot, channels, content, embed, png, filename)
             self.state[event["id"]] = dict(base, messages=refs)
             kma_push.save_state("report", self.state)
@@ -144,9 +144,9 @@ class KMAReportAlertCog(commands.Cog):
         if not record.get("messages") or not fresh:
             return
         stations = self.observed_levels(origin.timestamp(), event.get("max_level"))
-        png = await kma_push.render_png(event, "지진정보", stations)
+        analysis, png = await kma_push.prepare(event, "지진정보", stations)
         filename = f"kma_report_{int(origin.timestamp())}_{int(time.time())}.png"
-        content, embed = kma_push.build_message(event, "지진정보", filename, observed=bool(stations))
+        content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
         await kma_push.edit_messages(self.bot, record["messages"], content, embed, png, filename)
         logging.info(f"🔄 [KMA 報告] {key} 內容更新，已編輯 {len(record['messages'])} 則訊息")
 

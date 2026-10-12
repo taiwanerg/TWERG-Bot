@@ -9,7 +9,7 @@ import time
 import discord
 
 from module import kma_text
-from module.kma_intensity import EMBED_COLORS, parse_level, roman
+from module.kma_intensity import EMBED_COLORS, LEVEL_EMOJI, parse_level, roman
 
 STATE_DIR = "data"
 SETTINGS_FILE = "guild_settings.json"
@@ -130,54 +130,129 @@ def normalize_report(data):
     }
 
 
-async def render_png(event, mode_key, stations=None):
+async def prepare(event, mode_key, stations=None):
+    from module.kma_analysis import analyze
     from module.kma_map import render_kma_map
 
     async with _render_lock:
-        buf = await asyncio.to_thread(render_kma_map, event, mode_key, stations)
-    return buf.getvalue()
+        analysis = await asyncio.to_thread(analyze, event, mode_key, stations)
+        buf = await asyncio.to_thread(render_kma_map, event, mode_key, None, analysis)
+    return analysis, buf.getvalue()
 
 
-def build_message(event, mode_key, filename, observed=False):
+MODE_ICON = {"지진조기경보": "🚨", "지진속보": "⚠️", "지진정보": "📋"}
+FIELD_LIMIT = 1024
+
+
+def _clip(lines, limit=FIELD_LIMIT):
+    out, size = [], 0
+    for line in lines:
+        if size + len(line) + 1 > limit - 8:
+            out.append("…")
+            break
+        out.append(line)
+        size += len(line) + 1
+    return "\n".join(out)
+
+
+def _region_lines(regions, detail_levels=2, max_names=5):
+    lines = []
+    for index, group in enumerate(regions):
+        level = group["level"]
+        if level < 2:
+            continue
+        parts = []
+        for sido in group["sidos"]:
+            if index < detail_levels and sido["municipalities"]:
+                names = sido["municipalities"][:max_names]
+                more = len(sido["municipalities"]) - len(names)
+                inner = "·".join(names) + (f" 외 {more}" if more > 0 else "")
+                parts.append(f"{sido['ko']}({inner})")
+            else:
+                parts.append(sido["ko"])
+        zh = "、".join(s["zh"] for s in group["sidos"])
+        lines.append(f"{LEVEL_EMOJI.get(level, '▫️')} **{roman(level)}**　{' · '.join(parts)}")
+        lines.append(f"-# {zh}")
+    return lines
+
+
+def _city_lines(cities, origin, now, limit=8):
+    lines = []
+    shown = [c for c in cities if c["level"] >= 2][:limit]
+    for city in shown:
+        remain = origin.timestamp() + city["seconds"] - now if origin else None
+        if remain is None:
+            status = "-"
+        elif remain <= 0:
+            status = "도달 · 已抵達"
+        else:
+            arrive = int(origin.timestamp() + city["seconds"])
+            status = f"<t:{arrive}:R> · 약 {remain:.0f}초"
+        lines.append(f"{LEVEL_EMOJI.get(city['level'], '▫️')} **{city['ko']}** {city['zh']}　{roman(city['level'])}　{status}")
+    return lines
+
+
+def build_message(event, mode_key, filename, analysis):
     level = event.get("max_level") or 0
     serial = event.get("serial")
     mode_zh = MODE_ZH.get(mode_key, "")
-    title = f"{mode_key} · {mode_zh}"
-    if serial:
-        title = f"{mode_key} 제{serial}보 · {mode_zh} 第{serial}報"
+    icon = MODE_ICON.get(mode_key, "📋")
+    if mode_key == "지진정보":
+        content = f"## {icon} 지진정보\n-# 韓國氣象廳 {mode_zh}"
+    else:
+        content = f"## {icon} {mode_key} 제{serial or 1}보\n-# 韓國氣象廳 {mode_zh} 第{serial or 1}報"
+
     zh = event.get("place_zh") or ""
     zh_dir = kma_text.direction_zh(event.get("place_ko"))
-    zh_line = " · ".join(p for p in (zh, zh_dir) if p)
-    description = f"**{event.get('place_ko') or '-'}**"
-    if zh_line:
-        description += f"\n-# {zh_line}"
-    embed = discord.Embed(title=title, description=description, color=EMBED_COLORS.get(level, 0x8A9099))
+    zh_place = " ".join(p for p in (zh, zh_dir) if p)
     mag = event.get("magnitude")
     depth = event.get("depth")
-    embed.add_field(name="규모 · 規模", value=f"M {mag:.1f}" if mag is not None else "-", inline=True)
-    embed.add_field(name="깊이 · 深度", value=f"{depth:.0f} km" if depth is not None else "-", inline=True)
-    level_name = "최대진도 · 最大震度" if mode_key == "지진정보" else "최대 예상진도 · 最大預估震度"
-    embed.add_field(name=level_name, value=f"**{roman(level)}**" if level else "-", inline=True)
+    mag_text = f"M{mag:.1f}" if mag is not None else "-"
+    depth_text = f"{depth:.0f}km" if depth is not None else "-"
+    level_ko = "최대진도" if mode_key == "지진정보" else "최대 예상진도"
+    level_zh = "最大震度" if mode_key == "지진정보" else "最大預估震度"
+    desc = []
+    if zh_place:
+        desc.append(f"-# {zh_place}")
+    desc.append("")
+    desc.append(f"> 📏 규모 **{mag_text}**　🔻 깊이 **{depth_text}**　{LEVEL_EMOJI.get(level, '▫️')} {level_ko} **{roman(level)}**")
+    desc.append(f"> -# 規模 {mag_text}・深度 {depth_text}・{level_zh} {roman(level)}")
     origin = event.get("origin")
     if origin is not None:
         ts = int(origin.timestamp())
-        embed.add_field(
-            name="발생 시각 · 發震時間",
-            value=f"{kma_text.kst_text(origin)} KST\n<t:{ts}:F>（<t:{ts}:R>）",
-            inline=False,
-        )
+        desc.append("")
+        desc.append(f"🕒 발생 <t:{ts}:T>（<t:{ts}:R>）")
+        desc.append(f"-# 發震時間 {kma_text.kst_text(origin)} KST")
     if event.get("max_area"):
-        embed.add_field(name="최대진도 지역 · 最大震度地區", value=" · ".join(event["max_area"]), inline=False)
+        desc.append(f"🎯 최대진도 지역 **{' · '.join(event['max_area'])}**")
+
+    embed = discord.Embed(
+        title=f"📍 {event.get('place_ko') or '-'}",
+        description="\n".join(desc),
+        color=EMBED_COLORS.get(level, 0x8A9099),
+    )
+
+    if mode_key != "지진정보" and analysis.get("cities"):
+        city_lines = _city_lines(analysis["cities"], origin, time.time())
+        if city_lines:
+            embed.add_field(name="⏱️ S파 도달 예상 · S波預估抵達", value=_clip(city_lines), inline=False)
+
+    region_lines = _region_lines(analysis.get("regions") or [])
+    if region_lines:
+        if analysis.get("source") == "observed":
+            name = "📡 관측 진도 지역 · 測站觀測震度地區"
+        else:
+            name = "🗺️ 예상 진도 지역 · 預估震度地區"
+        embed.add_field(name=name, value=_clip(region_lines), inline=False)
+
     embed.set_image(url=f"attachment://{filename}")
-    if mode_key == "지진정보":
-        note = "관측진도: 기상청 실시간 관측소" if observed else "지도의 진도 분포는 TWERG 자체 추정"
+    if analysis.get("source") == "observed":
+        note = "관측진도: 기상청 실시간 관측소"
+    elif mode_key == "지진정보":
+        note = "진도 분포는 TWERG 추정 · 預估僅供參考"
     else:
-        note = "예상진도 분포는 TWERG 자체 추정 · 預估震度為推算"
-    embed.set_footer(text=f"자료 기상청(KMA) · {note}\nTaiwan Earthquake Recording Group · @taiwanwerg")
-    if mode_key == "지진정보":
-        content = "**지진정보** · 韓國地震報告"
-    else:
-        content = f"**{mode_key}** 제{serial or 1}보 · 韓國{mode_zh}"
+        note = "예상진도·도달시간은 TWERG 추정 · 預估僅供參考"
+    embed.set_footer(text=f"자료 기상청(KMA) · {note}\nTaiwan Earthquake Recording Group · @taiwanerg")
     return content, embed
 
 

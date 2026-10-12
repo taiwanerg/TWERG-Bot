@@ -60,9 +60,9 @@ class KMAEEWAlertCog(commands.Cog):
                 self.state[event_id] = {"md5": md5, "serial": 1, "messages": [], "ts": time.time()}
                 kma_push.save_state("eew", self.state)
                 return
-            png = await kma_push.render_png(event, event["mode"])
+            analysis, png = await kma_push.prepare(event, event["mode"])
             filename = f"kma_eew_{event_id}.png"
-            content, embed = kma_push.build_message(event, event["mode"], filename)
+            content, embed = kma_push.build_message(event, event["mode"], filename, analysis)
             refs = await kma_push.send_to_channels(self.bot, channels, content, embed, png, filename)
             self.state[event_id] = {"md5": md5, "serial": 1, "messages": refs, "ts": time.time()}
             kma_push.save_state("eew", self.state)
@@ -75,9 +75,9 @@ class KMAEEWAlertCog(commands.Cog):
         if not record.get("messages") or not fresh:
             return
         event["serial"] = serial
-        png = await kma_push.render_png(event, event["mode"])
+        analysis, png = await kma_push.prepare(event, event["mode"])
         filename = f"kma_eew_{event_id}_{serial}.png"
-        content, embed = kma_push.build_message(event, event["mode"], filename)
+        content, embed = kma_push.build_message(event, event["mode"], filename, analysis)
         await kma_push.edit_messages(self.bot, record["messages"], content, embed, png, filename)
         logging.info(f"🚨 [KMA 預警] {event_id} 更新為第{serial}報，已編輯 {len(record['messages'])} 則訊息")
 
