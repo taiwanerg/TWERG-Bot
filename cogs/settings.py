@@ -45,6 +45,12 @@ class SettingsOverviewView(discord.ui.View):
         revision_status = "`🟢` 已啟用" if self.settings.get("report_revision_enabled") else "`🔴` 已停用"
         if self.settings.get("report_revision_exptech_enabled", False):
             revision_status += "（ExpTech v2 補強）"
+        kma_parts = []
+        if self.settings.get("kma_eew_enabled"):
+            kma_parts.append("預警")
+        if self.settings.get("kma_report_enabled"):
+            kma_parts.append("報告")
+        kma_status = f"`🟢` 已啟用（{'、'.join(kma_parts)}）" if kma_parts else "`🔴` 已停用"
         
         embed.add_field(name="⚙️ TWERG 體感回報設定", value=eq_status, inline=False)
         embed.add_field(name="🖥️ YouTube 直播監控", value=yt_status, inline=False)
@@ -53,7 +59,8 @@ class SettingsOverviewView(discord.ui.View):
         embed.add_field(name="🌊 Early-est 推送設定", value=earlyest_status, inline=False)
         embed.add_field(name="📢 公告頻道自動發布", value=auto_pub_status, inline=False)
         embed.add_field(name="📝 地震報告更新推送", value=revision_status, inline=False)
-        
+        embed.add_field(name="🇰🇷 韓國地震 (KMA)", value=kma_status, inline=False)
+
         return embed
 
     @discord.ui.select(
@@ -65,7 +72,8 @@ class SettingsOverviewView(discord.ui.View):
             discord.SelectOption(label="GRMT 推送設定", value="grmt", emoji="🌍", description="自動推送 Global RMT 地震動報告"),
             discord.SelectOption(label="Early-est 推送設定", value="earlyest", emoji="🌊", description="自動推送 Early-est 即時地震報告"),
             discord.SelectOption(label="公告自動發布設定", value="auto_pub", emoji="📢", description="自動發布公告頻道的訊息"),
-            discord.SelectOption(label="地震報告更新推送", value="revision", emoji="📝", description="推送中央氣象署重新測定的地震資料")
+            discord.SelectOption(label="地震報告更新推送", value="revision", emoji="📝", description="推送中央氣象署重新測定的地震資料"),
+            discord.SelectOption(label="韓國地震 (KMA) 推送", value="kma", emoji="🇰🇷", description="韓國氣象廳地震預警與地震報告")
         ],
         row=0
     )
@@ -85,7 +93,9 @@ class SettingsOverviewView(discord.ui.View):
             view = AutoPublishSettingsView(self.guild_id)
         elif val == "revision":
             view = EarthquakeRevisionSettingsView(self.guild_id)
-        
+        elif val == "kma":
+            view = KMASettingsView(self.guild_id)
+
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
     @discord.ui.button(label="關閉設定", style=discord.ButtonStyle.danger, row=1)
@@ -663,6 +673,393 @@ class EarthquakeRevisionSettingsView(discord.ui.View):
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
     @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=3)
+    async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ **設定已儲存**", embed=self.build_embed(), view=None)
+        self.stop()
+
+
+class KMASettingsView(discord.ui.View):
+    def __init__(self, guild_id: int | str):
+        super().__init__(timeout=None)
+        self.guild_id = str(guild_id)
+        self.all_settings = load_settings()
+        self.settings = self.all_settings.setdefault(self.guild_id, {})
+        self.settings.setdefault("kma_eew_enabled", False)
+        self.settings.setdefault("kma_eew_channel_ids", [])
+        self.settings.setdefault("kma_report_enabled", False)
+        self.settings.setdefault("kma_report_channel_ids", [])
+        self.settings.setdefault("kma_report_min_magnitude", 2.0)
+        for child in self.children:
+            if isinstance(child, discord.ui.Select) and not isinstance(child, discord.ui.ChannelSelect):
+                for option in child.options:
+                    option.default = float(option.value) == float(self.settings["kma_report_min_magnitude"])
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="`🇰🇷` 韓國地震 (KMA) 推送設定",
+            description="韓國氣象廳（기상청）地震預警與地震報告，訊息與地圖以韓文為主、中文為輔。\n同一預警的後續報會直接編輯原訊息。",
+            color=0x003478,
+        )
+        eew_status = "`🟢` 已啟用" if self.settings["kma_eew_enabled"] else "`🔴` 已停用"
+        report_status = "`🟢` 已啟用" if self.settings["kma_report_enabled"] else "`🔴` 已停用"
+        eew_channels = self.settings["kma_eew_channel_ids"]
+        report_channels = self.settings["kma_report_channel_ids"]
+        embed.add_field(name="지진조기경보 · 地震預警", value=eew_status, inline=True)
+        embed.add_field(name="지진정보 · 地震報告", value=report_status, inline=True)
+        embed.add_field(name="報告最低規模", value=f"M {float(self.settings['kma_report_min_magnitude']):.1f} 以上", inline=True)
+        embed.add_field(
+            name="預警推送頻道",
+            value="\n".join(f"<#{c}>" for c in eew_channels) if eew_channels else "⚠️ 尚未設定",
+            inline=False,
+        )
+        embed.add_field(
+            name="報告推送頻道",
+            value="\n".join(f"<#{c}>" for c in report_channels) if report_channels else "⚠️ 尚未設定",
+            inline=False,
+        )
+        mention_mode = KMA_EEW_MENTION_LABELS.get(self.settings.get("kma_eew_mention_mode", "kma"), "")
+        eew_roles = self.settings.get("kma_eew_mention_role_ids", [])
+        mention_text = f"{' '.join(f'<@&{r}>' for r in eew_roles)}\n-# {mention_mode}" if eew_roles else "未設定"
+        embed.add_field(name="🔔 預警 tag", value=mention_text, inline=True)
+        disconnect = "`🟢` 已啟用" if self.settings.get("kma_disconnect_enabled") else "`🔴` 已停用"
+        if self.settings.get("kma_disconnect_channel_id"):
+            disconnect += f"\n<#{self.settings['kma_disconnect_channel_id']}>"
+        embed.add_field(name="📡 斷線通知", value=disconnect, inline=True)
+        embed.set_footer(text="資料來源：韓國氣象廳 KMA · 預估震度為 TWERG 推算，僅供參考")
+        return embed
+
+    def _save(self):
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+
+    @discord.ui.button(label="切換預警推送", style=discord.ButtonStyle.primary, row=0)
+    async def toggle_eew(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.settings["kma_eew_enabled"] = not self.settings["kma_eew_enabled"]
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="切換報告推送", style=discord.ButtonStyle.primary, row=0)
+    async def toggle_report(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.settings["kma_report_enabled"] = not self.settings["kma_report_enabled"]
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="警報 tag 設定", emoji="🔔", style=discord.ButtonStyle.secondary, row=0)
+    async def open_mentions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = KMAMentionSettingsView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="斷線通知設定", emoji="📡", style=discord.ButtonStyle.secondary, row=0)
+    async def open_disconnect(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = KMADisconnectSettingsView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+        placeholder="選擇預警推送頻道 (可多選，將覆蓋原設定)",
+        min_values=0,
+        max_values=25,
+        row=1,
+    )
+    async def select_eew_channels(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.settings["kma_eew_channel_ids"] = [c.id for c in select.values]
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+        placeholder="選擇報告推送頻道 (可多選，將覆蓋原設定)",
+        min_values=0,
+        max_values=25,
+        row=2,
+    )
+    async def select_report_channels(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.settings["kma_report_channel_ids"] = [c.id for c in select.values]
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.select(
+        placeholder="選擇報告最低推送規模",
+        options=[
+            discord.SelectOption(label="規模 2.0 以上（全部）", value="2.0"),
+            discord.SelectOption(label="規模 2.5 以上", value="2.5"),
+            discord.SelectOption(label="規模 3.0 以上", value="3.0"),
+            discord.SelectOption(label="規模 3.5 以上", value="3.5"),
+            discord.SelectOption(label="規模 4.0 以上", value="4.0"),
+            discord.SelectOption(label="規模 5.0 以上", value="5.0"),
+        ],
+        row=3,
+    )
+    async def select_min_magnitude(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.settings["kma_report_min_magnitude"] = float(select.values[0])
+        self._save()
+        for option in select.options:
+            option.default = option.value == select.values[0]
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="返回概覽", style=discord.ButtonStyle.secondary, row=4)
+    async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = SettingsOverviewView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=4)
+    async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ **設定已儲存**", embed=self.build_embed(), view=None)
+        self.stop()
+
+
+KMA_EEW_MENTION_LABELS = {
+    "kma": "KMA 災難簡訊基準（조기경보 一律、속보 最大預估震度 Ⅴ 以上）",
+    "all": "所有預警（조기경보＋속보）",
+    "warning": "僅 지진조기경보（M5.0 以上）",
+    "off": "不 tag",
+}
+
+KMA_REPORT_MENTION_LABELS = {
+    "0": "不 tag",
+    "3": "最大震度 Ⅲ 以上",
+    "4": "最大震度 Ⅳ 以上",
+    "5": "最大震度 Ⅴ 以上",
+    "6": "最大震度 Ⅵ 以上",
+}
+
+KMA_MENTION_NOTE = "身分組需開啟「允許任何人提及此身分組」，或機器人需有「提及 @everyone、@here 和所有身分組」權限。"
+
+
+def _role_defaults(ids):
+    return [
+        discord.SelectDefaultValue(id=int(i), type=discord.SelectDefaultValueType.role)
+        for i in ids if str(i).isdigit()
+    ][:25]
+
+
+class KMAMentionSettingsView(discord.ui.View):
+    def __init__(self, guild_id: int | str):
+        super().__init__(timeout=None)
+        self.guild_id = str(guild_id)
+        self.all_settings = load_settings()
+        self.settings = self.all_settings.setdefault(self.guild_id, {})
+        self.settings.setdefault("kma_eew_mention_role_ids", [])
+        self.settings.setdefault("kma_eew_mention_mode", "kma")
+        self.settings.setdefault("kma_report_mention_role_ids", [])
+        self.settings.setdefault("kma_report_mention_min_level", 0)
+        self.select_eew_roles.default_values = _role_defaults(self.settings["kma_eew_mention_role_ids"])
+        self.select_report_roles.default_values = _role_defaults(self.settings["kma_report_mention_role_ids"])
+        for option in self.select_eew_mode.options:
+            option.default = option.value == self.settings["kma_eew_mention_mode"]
+        for option in self.select_report_level.options:
+            option.default = option.value == str(self.settings["kma_report_mention_min_level"])
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="`🔔` 韓國地震 tag 設定",
+            description=(
+                "預設依韓國災難簡訊（긴급재난문자）規則：\n"
+                "・지진조기경보（M5.0 以上）→ 全國強制簡訊 → 一律 tag\n"
+                "・지진속보 → 最大預估震度 Ⅴ 以上才 tag\n"
+                "後續報升級到符合條件時，會另發一則 tag 訊息並回覆原訊息。"
+            ),
+            color=0xD7261E,
+        )
+        eew_roles = self.settings["kma_eew_mention_role_ids"]
+        report_roles = self.settings["kma_report_mention_role_ids"]
+        embed.add_field(
+            name="預警 tag 身分組",
+            value=" ".join(f"<@&{r}>" for r in eew_roles) if eew_roles else "⚠️ 尚未設定",
+            inline=False,
+        )
+        embed.add_field(name="預警 tag 條件", value=KMA_EEW_MENTION_LABELS[self.settings["kma_eew_mention_mode"]], inline=False)
+        embed.add_field(
+            name="報告 tag 身分組",
+            value=" ".join(f"<@&{r}>" for r in report_roles) if report_roles else "未設定",
+            inline=False,
+        )
+        embed.add_field(
+            name="報告 tag 條件",
+            value=KMA_REPORT_MENTION_LABELS.get(str(self.settings["kma_report_mention_min_level"]), "不 tag"),
+            inline=False,
+        )
+        embed.set_footer(text=KMA_MENTION_NOTE)
+        return embed
+
+    def _save(self):
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="選擇預警要 tag 的身分組（可多選）", min_values=0, max_values=10, row=0)
+    async def select_eew_roles(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        self.settings["kma_eew_mention_role_ids"] = [r.id for r in select.values]
+        select.default_values = _role_defaults(self.settings["kma_eew_mention_role_ids"])
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.select(
+        placeholder="選擇預警 tag 條件",
+        options=[discord.SelectOption(label=v[:100], value=k) for k, v in KMA_EEW_MENTION_LABELS.items()],
+        row=1,
+    )
+    async def select_eew_mode(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.settings["kma_eew_mention_mode"] = select.values[0]
+        for option in select.options:
+            option.default = option.value == select.values[0]
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="選擇報告要 tag 的身分組（可多選）", min_values=0, max_values=10, row=2)
+    async def select_report_roles(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        self.settings["kma_report_mention_role_ids"] = [r.id for r in select.values]
+        select.default_values = _role_defaults(self.settings["kma_report_mention_role_ids"])
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.select(
+        placeholder="選擇報告 tag 條件",
+        options=[discord.SelectOption(label=v, value=k) for k, v in KMA_REPORT_MENTION_LABELS.items()],
+        row=3,
+    )
+    async def select_report_level(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.settings["kma_report_mention_min_level"] = int(select.values[0])
+        for option in select.options:
+            option.default = option.value == select.values[0]
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="返回 KMA 設定", style=discord.ButtonStyle.secondary, row=4)
+    async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = KMASettingsView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=4)
+    async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ **設定已儲存**", embed=self.build_embed(), view=None)
+        self.stop()
+
+
+class KMADisconnectSettingsView(discord.ui.View):
+    def __init__(self, guild_id: int | str):
+        super().__init__(timeout=None)
+        self.guild_id = str(guild_id)
+        self.all_settings = load_settings()
+        self.settings = self.all_settings.setdefault(self.guild_id, {})
+        self.settings.setdefault("kma_disconnect_enabled", False)
+        self.settings.setdefault("kma_disconnect_channel_id", None)
+        self.settings.setdefault("kma_disconnect_mention_ids", [])
+        self.settings.setdefault("kma_disconnect_repeat", "repeat")
+        self.select_targets.default_values = self._mention_defaults()
+        for option in self.select_repeat.options:
+            option.default = option.value == self.settings["kma_disconnect_repeat"]
+
+    def _mention_defaults(self):
+        result = []
+        for item in self.settings["kma_disconnect_mention_ids"]:
+            kind, _, raw = str(item).partition(":")
+            if raw.isdigit():
+                value_type = discord.SelectDefaultValueType.role if kind == "role" else discord.SelectDefaultValueType.user
+                result.append(discord.SelectDefaultValue(id=int(raw), type=value_type))
+        return result[:25]
+
+    def _mention_text(self):
+        parts = []
+        for item in self.settings["kma_disconnect_mention_ids"]:
+            kind, _, raw = str(item).partition(":")
+            if raw.isdigit():
+                parts.append(f"<@&{raw}>" if kind == "role" else f"<@{raw}>")
+        return " ".join(parts)
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="`📡` 韓國地震斷線通知設定",
+            description=(
+                "任一 KMA 資料連線（預警／報告／測站）中斷超過 60 秒時，發送通知並附上原因。\n"
+                "連線恢復時會再發一則恢復通知與中斷時長。"
+            ),
+            color=0x0F2C59,
+        )
+        status = "`🟢` 已啟用" if self.settings["kma_disconnect_enabled"] else "`🔴` 已停用"
+        channel_id = self.settings["kma_disconnect_channel_id"]
+        repeat = "僅通知一次" if self.settings["kma_disconnect_repeat"] == "once" else "每 10 分鐘提醒，最多 6 次"
+        embed.add_field(name="通知狀態", value=status, inline=True)
+        embed.add_field(name="提醒模式", value=repeat, inline=True)
+        embed.add_field(name="通知頻道", value=f"<#{channel_id}>" if channel_id else "⚠️ 尚未設定", inline=False)
+        embed.add_field(name="tag 對象", value=self._mention_text() or "不 tag", inline=False)
+        embed.set_footer(text=KMA_MENTION_NOTE)
+        return embed
+
+    def _save(self):
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+
+    @discord.ui.button(label="切換通知狀態", style=discord.ButtonStyle.primary, row=0)
+    async def toggle_enabled(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.settings["kma_disconnect_enabled"] = not self.settings["kma_disconnect_enabled"]
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="發送測試通知", style=discord.ButtonStyle.secondary, row=0)
+    async def send_test(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.settings["kma_disconnect_channel_id"]:
+            await interaction.response.send_message("⚠️ 請先選擇通知頻道。", ephemeral=True)
+            return
+        cog = interaction.client.get_cog("KMACog")
+        if cog is None or not cog.streams():
+            await interaction.response.send_message("⚠️ KMA 模組尚未載入，無法測試。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        ok = await cog.send_test(self.guild_id)
+        await interaction.followup.send("✅ 已發送測試通知。" if ok else "❌ 測試通知發送失敗，請檢查頻道權限。", ephemeral=True)
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+        placeholder="選擇斷線通知頻道",
+        min_values=0,
+        max_values=1,
+        row=1,
+    )
+    async def select_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.settings["kma_disconnect_channel_id"] = select.values[0].id if select.values else None
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.select(
+        cls=discord.ui.MentionableSelect,
+        placeholder="選擇要 tag 的人或身分組（可多選）",
+        min_values=0,
+        max_values=10,
+        row=2,
+    )
+    async def select_targets(self, interaction: discord.Interaction, select: discord.ui.MentionableSelect):
+        items = []
+        for value in select.values:
+            items.append(f"role:{value.id}" if isinstance(value, discord.Role) else f"user:{value.id}")
+        self.settings["kma_disconnect_mention_ids"] = items
+        select.default_values = self._mention_defaults()
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.select(
+        placeholder="選擇提醒模式",
+        options=[
+            discord.SelectOption(label="每 10 分鐘提醒，最多 6 次（預設）", value="repeat"),
+            discord.SelectOption(label="僅通知一次", value="once"),
+        ],
+        row=3,
+    )
+    async def select_repeat(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.settings["kma_disconnect_repeat"] = select.values[0]
+        for option in select.options:
+            option.default = option.value == select.values[0]
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="返回 KMA 設定", style=discord.ButtonStyle.secondary, row=4)
+    async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = KMASettingsView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=4)
     async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="✅ **設定已儲存**", embed=self.build_embed(), view=None)
         self.stop()
