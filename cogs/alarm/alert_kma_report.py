@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import numpy as np
 from discord.ext import commands
 
-from module import kma_push, kma_text
+from module import kma_backup, kma_push, kma_text
 from module.kma_intensity import clamp_level, epicentral_distance_km
 from module.kma_ws import KMAStream
 
@@ -30,10 +30,13 @@ class KMAReportAlertCog(commands.Cog):
         self.station_stream = KMAStream(bot, "kma_station", self.on_station)
         self.stream.start()
         self.station_stream.start()
+        self.backup = kma_backup.get_stream(bot)
+        self.backup.register("report", self.on_backup)
 
     def cog_unload(self):
         asyncio.create_task(self.stream.stop())
         asyncio.create_task(self.station_stream.stop())
+        self.backup.unregister("report")
 
     async def on_station(self, payload):
         if payload.get("type") == "kma_stations_update":
@@ -89,12 +92,21 @@ class KMAReportAlertCog(commands.Cog):
             return
         md5 = kma_push.frame_digest(payload)
         async with self.lock:
-            await self.process(data, md5)
+            await self.process("primary", kma_push.normalize_report(data), md5)
 
-    def find_record(self, event):
+    async def on_backup(self, doc):
+        if doc.get("id") is None:
+            return
+        md5 = kma_push.doc_digest(doc)
+        async with self.lock:
+            await self.process("backup", kma_push.normalize_backup_report(doc), md5)
+
+    def find_record(self, source, event):
+        tag = f"{source}:{event['id']}"
         for key, record in self.state.items():
-            if key == event["id"]:
+            if (source == "primary" and key == event["id"]) or tag in record.get("ids", []):
                 return key, record
+        for key, record in self.state.items():
             origin = record.get("origin")
             if origin is None or event.get("origin") is None or event.get("lat") is None:
                 continue
@@ -103,56 +115,86 @@ class KMAReportAlertCog(commands.Cog):
                     return key, record
         return None, None
 
-    async def process(self, data, md5):
-        event = kma_push.normalize_report(data)
-        key, record = self.find_record(event)
-        if record and record.get("md5") == md5:
+    def _remember(self, record, source, event, md5):
+        origin = event.get("origin")
+        kma_push.record_digests(record)[source] = md5
+        tag = f"{source}:{event['id']}"
+        ids = record.setdefault("ids", [])
+        if tag not in ids:
+            ids.append(tag)
+        if source == "primary":
+            record["md5"] = md5
+        record.update({
+            "ts": time.time(),
+            "origin": origin.timestamp() if origin else record.get("origin"),
+            "lat": event.get("lat") if event.get("lat") is not None else record.get("lat"),
+            "lon": event.get("lon") if event.get("lon") is not None else record.get("lon"),
+        })
+
+    async def process(self, source, event, md5):
+        key, record = self.find_record(source, event)
+        if record is not None and kma_push.record_digests(record).get(source) == md5:
             return
         origin = event.get("origin")
         now = datetime.now(timezone.utc)
         fresh = origin is not None and (now - origin).total_seconds() <= FRESH_SECONDS
-        base = {
-            "md5": md5,
-            "ts": time.time(),
-            "origin": origin.timestamp() if origin else None,
-            "lat": event.get("lat"),
-            "lon": event.get("lon"),
-        }
 
         if record is None:
+            key = event["id"] if source == "primary" else f"{source}:{event['id']}"
+            record = {"messages": [], "sig": kma_push.signature(event)}
+            self._remember(record, source, event, md5)
+            self.state[key] = record
             if not fresh:
-                self.state[event["id"]] = dict(base, messages=[])
                 kma_push.save_state("report", self.state)
                 return
-            channels = kma_push.targets("report", event)
+            channels = kma_push.targets("report", event, source)
             if not channels:
-                self.state[event["id"]] = dict(base, messages=[])
                 kma_push.save_state("report", self.state)
                 return
             stations = await self.wait_observed(origin, event.get("max_level"))
             analysis, png = await kma_push.prepare(event, "지진정보", stations)
             filename = f"kma_report_{int(origin.timestamp())}.png"
             content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
-            refs = await kma_push.send_to_channels(self.bot, channels, content, embed, png, filename)
-            self.state[event["id"]] = dict(base, messages=refs)
+            record["messages"] = await kma_push.send_to_channels(self.bot, channels, content, embed, png, filename)
             kma_push.save_state("report", self.state)
-            logging.info(f"🚨 [KMA 報告] {event['id']} M{event.get('magnitude')} 已發送至 {len(refs)} 個頻道")
+            logging.info(f"🚨 [KMA 報告] {key} M{event.get('magnitude')} 已發送至 {len(record['messages'])} 個頻道")
             return
 
-        record.update(base)
+        previous = kma_push.record_digests(record).get(source)
+        sig = kma_push.signature(event)
+        self._remember(record, source, event, md5)
+        if source == "primary" and previous is not None and not kma_push.has_backup(record):
+            changed = True
+        else:
+            changed = kma_push.signature_changed(record.get("sig"), sig)
+        if changed:
+            record["sig"] = sig
         kma_push.save_state("report", self.state)
-        if not record.get("messages") or not fresh:
+        if not fresh:
             return
-        stations = self.observed_levels(origin.timestamp(), event.get("max_level"))
+        sent = [ref[0] for ref in record.get("messages", [])]
+        new_channels = kma_push.targets("report", event, source, exclude=sent)
+        edit = changed and bool(record.get("messages"))
+        if not edit and not new_channels:
+            return
+        if new_channels and not record.get("messages"):
+            stations = await self.wait_observed(origin, event.get("max_level"))
+        else:
+            stations = self.observed_levels(origin.timestamp(), event.get("max_level"))
         analysis, png = await kma_push.prepare(event, "지진정보", stations)
         filename = f"kma_report_{int(origin.timestamp())}_{int(time.time())}.png"
         content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
-        await kma_push.edit_messages(self.bot, record["messages"], content, embed, png, filename, kind="report", event=event)
-        if await kma_push.ping_upgrades(
-            self.bot, "report", record["messages"], event, "지진정보 갱신 · 진도 상향", "地震報告更新 · 震度上修",
-        ):
-            kma_push.save_state("report", self.state)
-        logging.info(f"🔄 [KMA 報告] {key} 內容更新，已編輯 {len(record['messages'])} 則訊息")
+        if edit:
+            await kma_push.edit_messages(self.bot, record["messages"], content, embed, png, filename, kind="report", event=event)
+            await kma_push.ping_upgrades(
+                self.bot, "report", record["messages"], event, "지진정보 갱신 · 진도 상향", "地震報告更新 · 震度上修",
+            )
+            logging.info(f"🔄 [KMA 報告] {key} 內容更新（{source}），已編輯 {len(record['messages'])} 則訊息")
+        if new_channels:
+            refs = await kma_push.send_to_channels(self.bot, new_channels, content, embed, png, filename)
+            record.setdefault("messages", []).extend(refs)
+            logging.info(f"🚨 [KMA 報告] {key} 由 {source} 補發至 {len(refs)} 個頻道")
+        kma_push.save_state("report", self.state)
 
     async def wait_observed(self, origin, max_level):
         if origin is None:

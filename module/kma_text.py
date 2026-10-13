@@ -38,6 +38,16 @@ def parse_time(value, tz=UTC8):
     return dt.replace(tzinfo=tz)
 
 
+def parse_iso(value):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).strip())
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=KST)
+
+
 def eew_origin_time(shock_text, create_text):
     shock = parse_time(shock_text)
     create = parse_time(create_text)

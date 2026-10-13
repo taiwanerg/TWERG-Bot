@@ -4,6 +4,8 @@ from discord import app_commands
 import json
 import os
 
+from module.kma_backup import is_configured as kma_backup_configured
+
 # 定義儲存各伺服器設定的檔案路徑
 SETTINGS_FILE = 'guild_settings.json'
 
@@ -689,6 +691,9 @@ class KMASettingsView(discord.ui.View):
         self.settings.setdefault("kma_report_enabled", False)
         self.settings.setdefault("kma_report_channel_ids", [])
         self.settings.setdefault("kma_report_min_magnitude", 2.0)
+        self.backup_available = kma_backup_configured()
+        if not self.backup_available:
+            self.remove_item(self.toggle_backup)
         for child in self.children:
             if isinstance(child, discord.ui.Select) and not isinstance(child, discord.ui.ChannelSelect):
                 for option in child.options:
@@ -725,6 +730,13 @@ class KMASettingsView(discord.ui.View):
         if self.settings.get("kma_disconnect_channel_id"):
             disconnect += f"\n<#{self.settings['kma_disconnect_channel_id']}>"
         embed.add_field(name="📡 斷線通知", value=disconnect, inline=True)
+        if self.backup_available:
+            backup = "`🟢` 已開啟" if self.settings.get("kma_backup_enabled") else "`🔴` 未開啟"
+            embed.add_field(
+                name="🛡️ 強化伺服器穩定性",
+                value=f"{backup}\n-# 同時接收備援伺服器，任一來源先到就先推送，不會重複",
+                inline=False,
+            )
         embed.set_footer(text="資料來源：韓國氣象廳 KMA · 預估震度為 TWERG 推算，僅供參考")
         return embed
 
@@ -753,6 +765,17 @@ class KMASettingsView(discord.ui.View):
     async def open_disconnect(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = KMADisconnectSettingsView(self.guild_id)
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="強化伺服器穩定性", emoji="🛡️", style=discord.ButtonStyle.secondary, row=0)
+    async def toggle_backup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not kma_backup_configured():
+            self.backup_available = False
+            self.remove_item(self.toggle_backup)
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            return
+        self.settings["kma_backup_enabled"] = not self.settings.get("kma_backup_enabled", False)
+        self._save()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     @discord.ui.select(
         cls=discord.ui.ChannelSelect,
