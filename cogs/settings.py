@@ -851,11 +851,34 @@ KMA_REPORT_MENTION_LABELS = {
 KMA_MENTION_NOTE = "身分組需開啟「允許任何人提及此身分組」，或機器人需有「提及 @everyone、@here 和所有身分組」權限。"
 
 
+def _select_default(entity_id, kind):
+    """建立不同 discord.py/Pycord 版本的選單預設值。
+
+    舊版套件尚未支援 SelectDefaultValue，此時不預選項目，
+    但仍允許使用者選擇並儲存設定。
+    """
+    default_cls = getattr(discord, "SelectDefaultValue", None)
+    if default_cls is None:
+        default_cls = getattr(getattr(discord, "components", None), "SelectDefaultValue", None)
+    if default_cls is None:
+        return None
+
+    snowflake = discord.Object(id=int(entity_id))
+    factory = getattr(default_cls, f"from_{kind}", None)
+    if factory is not None:
+        return factory(snowflake)
+
+    value_type_cls = getattr(discord, "SelectDefaultValueType", None)
+    if value_type_cls is None:
+        value_type_cls = getattr(getattr(discord, "enums", None), "SelectDefaultValueType", None)
+    if value_type_cls is None:
+        return None
+    return default_cls(id=int(entity_id), type=getattr(value_type_cls, kind))
+
+
 def _role_defaults(ids):
-    return [
-        discord.SelectDefaultValue.from_role(discord.Object(id=int(i)))
-        for i in ids if str(i).isdigit()
-    ][:25]
+    defaults = (_select_default(i, "role") for i in ids if str(i).isdigit())
+    return [value for value in defaults if value is not None][:25]
 
 
 class KMAMentionSettingsView(discord.ui.View):
@@ -978,12 +1001,10 @@ class KMADisconnectSettingsView(discord.ui.View):
         result = []
         for item in self.settings["kma_disconnect_mention_ids"]:
             kind, _, raw = str(item).partition(":")
-            if raw.isdigit():
-                snowflake = discord.Object(id=int(raw))
-                if kind == "role":
-                    result.append(discord.SelectDefaultValue.from_role(snowflake))
-                elif kind == "user":
-                    result.append(discord.SelectDefaultValue.from_user(snowflake))
+            if raw.isdigit() and kind in ("role", "user"):
+                value = _select_default(raw, kind)
+                if value is not None:
+                    result.append(value)
         return result[:25]
 
     def _mention_text(self):
