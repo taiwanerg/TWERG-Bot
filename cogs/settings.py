@@ -853,7 +853,7 @@ KMA_MENTION_NOTE = "身分組需開啟「允許任何人提及此身分組」，
 
 def _role_defaults(ids):
     return [
-        discord.SelectDefaultValue(id=int(i), type=discord.SelectDefaultValueType.role)
+        discord.SelectDefaultValue.from_role(discord.Object(id=int(i)))
         for i in ids if str(i).isdigit()
     ][:25]
 
@@ -979,8 +979,11 @@ class KMADisconnectSettingsView(discord.ui.View):
         for item in self.settings["kma_disconnect_mention_ids"]:
             kind, _, raw = str(item).partition(":")
             if raw.isdigit():
-                value_type = discord.SelectDefaultValueType.role if kind == "role" else discord.SelectDefaultValueType.user
-                result.append(discord.SelectDefaultValue(id=int(raw), type=value_type))
+                snowflake = discord.Object(id=int(raw))
+                if kind == "role":
+                    result.append(discord.SelectDefaultValue.from_role(snowflake))
+                elif kind == "user":
+                    result.append(discord.SelectDefaultValue.from_user(snowflake))
         return result[:25]
 
     def _mention_text(self):
