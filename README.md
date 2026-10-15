@@ -71,7 +71,7 @@ pip install discord.py geopandas matplotlib shapely pillow
 ```
 "DISCORD_TOKEN": Discord 機器人 Token
 "CWA_API_KEY": 中央氣象署開放資料平臺 申請的 API 金鑰
-"OWNER_ID": 自己的 Discord 使用者 ID，用於執行擁有者限定指令 (如 /shutdown)
+"OWNER_IDS": Discord 擁有者的使用者 ID 清單，清單中的帳號均可執行擁有者限定指令 (如 /shutdown)
 "GUILD_IDS": (選填) Discord 伺服器 ID 列表。用於即時同步斜線指令，若留空則會進行全域同步 (會等到天荒地老)
 "YT_VIDEO_ID": 要監控的 YouTube 直播 ID （watch?v= 後面那一串英文），未填寫則 /yt 指令不可用
 "DYFI_CHANNEL_ID": 偵測 Discord 訊息的頻道網址，若不將 Discord 頻道的訊息回報納入統計與地圖中，可不填寫
