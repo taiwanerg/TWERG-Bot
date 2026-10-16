@@ -408,7 +408,7 @@ class EarthquakeRevisionAlertCog(commands.Cog):
 
         with closing(sqlite3.connect(DATABASE_PATH)) as connection, connection:
             old_row = connection.execute("""
-                SELECT snapshot_json, report_json FROM earthquake_reports
+                SELECT snapshot_json FROM earthquake_reports
                 WHERE source = ? AND earthquake_no = ?
             """, (source, storage_key)).fetchone()
             connection.execute("""
@@ -430,9 +430,11 @@ class EarthquakeRevisionAlertCog(commands.Cog):
                     connection, event_key, display_no, snapshot, "cwa", report.get("Web"), now
                 )
 
-        if old_row is None or json.loads(old_row[1]) == report:
+        if old_row is None:
             return None
         old_snapshot = self._normalize_snapshot(json.loads(old_row[0]))
+        if old_snapshot == snapshot:
+            return None
         change = self._make_change(
             event_key=event_key,
             earthquake_no=display_no,
@@ -443,7 +445,6 @@ class EarthquakeRevisionAlertCog(commands.Cog):
             web=report.get("Web"),
             old_source="CWA",
             new_source="CWA",
-            version_material=report_json,
         )
         self._record_change(change)
         return change
