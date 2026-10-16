@@ -659,7 +659,7 @@ class EqEmulatorCog(commands.Cog):
         app_commands.Choice(name="正斷層", value="正斷層"),
         app_commands.Choice(name="平移斷層", value="平移斷層")
     ])
-    async def emulator(self, interaction: discord.Interaction, mag: app_commands.Range[float, 1.0, 9.5], lat: app_commands.Range[float, -90.0, 90.0], lon: app_commands.Range[float, -180.0, 180.0], depth: app_commands.Range[float, 0.0, 800.0], fault_type: app_commands.Choice[str]):
+    async def emulator(self, interaction: discord.Interaction, mag: app_commands.Range[float, 1.0, 9.9], lat: app_commands.Range[float, -90.0, 90.0], lon: app_commands.Range[float, -180.0, 180.0], depth: app_commands.Range[float, 0.0, 800.0], fault_type: app_commands.Choice[str]):
         await interaction.response.defer()
         
         try:
