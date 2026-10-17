@@ -17,36 +17,58 @@ try:
 except ImportError:
     render_map = None
 from module.discord_dyfi import fetch_discord_reports
+from module import outbox
+
+DYFI_DELAY = 1800
+FETCH_RETRY_DELAY = 300
+FETCH_RETRY_LIMIT = 3
 
 class DyfiReportCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # 用來記錄已經在排程倒數中的地震編號，避免重複倒數
-        self.scheduled_eqs = set()
+        self.box = outbox.get(bot)
+        self.box.on_timer("dyfi_report", self.run_scheduled)
+
+    @staticmethod
+    def channel_ids(channels):
+        return [int(getattr(c, "id", c)) for c in channels]
 
     @commands.Cog.listener()
-    async def on_earthquake_pushed(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", epicenter: dict = None):
-        # 檢查是否已經在倒數中
-        if eq_no in self.scheduled_eqs:
+    async def on_earthquake_pushed(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", epicenter: dict = None, reply_to: dict = None):
+        args = {
+            "eq_no": str(eq_no), "channels": self.channel_ids(channels), "magnitude": magnitude, "depth": depth,
+            "origin_time": origin_time, "epicenter": epicenter, "reply_to": reply_to or {}, "attempt": 0,
+        }
+        if not self.box.schedule(f"dyfi:{eq_no}", "dyfi_report", time.time() + DYFI_DELAY, args):
             logging.warning(f"⚠️ 地震 {eq_no} 的 TWERG 體感回報已在排程中，略過重複觸發。")
             return
-            
-        self.scheduled_eqs.add(eq_no)
         logging.info(f"⏳ 已排程地震 {eq_no} 的 TWERG 體感回報，將在 30 分鐘後發送...")
-        
-        # 將等待與發送的工作建立為背景任務，不阻塞目前的事件處理
-        self.bot.loop.create_task(self.send_dyfi_report(eq_no, channels, magnitude, depth, origin_time, delay=1800, epicenter=epicenter))
+
+    def run_scheduled(self, args):
+        self.bot.loop.create_task(self.send_dyfi_report(
+            args["eq_no"], args["channels"], args["magnitude"], args["depth"], args["origin_time"],
+            delay=0, epicenter=args.get("epicenter"), reply_to=args.get("reply_to"), retry_args=args,
+        ))
+
+    def retry_later(self, args):
+        if args is None or args.get("attempt", 0) >= FETCH_RETRY_LIMIT:
+            return
+        args = dict(args, attempt=args.get("attempt", 0) + 1)
+        self.box.schedule(f"dyfi:{args['eq_no']}:retry{args['attempt']}", "dyfi_report", time.time() + FETCH_RETRY_DELAY, args)
+        logging.info(f"⏳ 地震 {args['eq_no']} 的 TWERG 體感回報資料暫時取不到，{FETCH_RETRY_DELAY // 60} 分鐘後重試（第 {args['attempt']} 次）")
 
     @commands.Cog.listener()
     async def on_force_dyfi_report(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", epicenter: dict = None):
         logging.info(f"🚨 管理員強制推送了地震 {eq_no} 的 TWERG 體感回報！")
-        self.bot.loop.create_task(self.send_dyfi_report(eq_no, channels, magnitude, depth, origin_time, delay=0, epicenter=epicenter))
+        self.bot.loop.create_task(self.send_dyfi_report(eq_no, channels, magnitude, depth, origin_time, delay=0, epicenter=epicenter, key_suffix=f":{int(time.time())}"))
 
-    async def send_dyfi_report(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", delay: int = 1800, epicenter: dict = None):
+    async def send_dyfi_report(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", delay: int = DYFI_DELAY, epicenter: dict = None, reply_to: dict = None, retry_args: dict = None, key_suffix: str = ""):
         if delay > 0:
             await asyncio.sleep(delay)
-            self.scheduled_eqs.discard(eq_no) # 倒數結束，從清單移除
-        
+
+        channels = [c for c in (self.bot.get_channel(i) for i in self.channel_ids(channels)) if c is not None]
+        reply_to = reply_to or {}
+
         try:
             with open('guild_settings.json', 'r', encoding='utf-8') as f:
                 guild_settings = json.load(f)
@@ -70,6 +92,7 @@ class DyfiReportCog(commands.Cog):
                 async with session.get(url) as response:
                     if response.status != 200:
                         logging.warning(f"⚠️ 無法取得 TWERG 體感回報資料，狀態碼：{response.status}")
+                        self.retry_later(retry_args)
                         return
                     
                     data = await response.json()
@@ -191,23 +214,22 @@ class DyfiReportCog(commands.Cog):
                         view.add_item(btn_url)
                         view.add_item(btn_recent)
                         
-                        try:
-                            send_embed = channel_embed.copy()
-                            if channel_map_bytes and should_render_map:
-                                map_file = discord.File(fp=io.BytesIO(channel_map_bytes), filename="dyfi_map.png")
-                                send_embed.set_image(url="attachment://dyfi_map.png")
-                                await channel.send(content=message_content, embed=send_embed, view=view, file=map_file)
-                            else:
-                                await channel.send(content=message_content, embed=send_embed, view=view)
-                        except discord.Forbidden:
-                            logging.error(f"❌ 無法發送體感報告至頻道 {channel.id}：權限不足。")
-                        except Exception as e:
-                            logging.error(f"❌ 發送體感報告至頻道 {channel.id} 時發生錯誤：{e}")
-                    
+                        send_embed = channel_embed.copy()
+                        map_files = None
+                        if channel_map_bytes and should_render_map:
+                            map_files = [(channel_map_bytes, "dyfi_map.png")]
+                            send_embed.set_image(url="attachment://dyfi_map.png")
+                        await self.box.send(
+                            f"dyfi:{eq_no}:{channel.id}{key_suffix}", channel.id,
+                            content=message_content, embed=send_embed, view=view, files=map_files,
+                            reply_to=reply_to.get(str(channel.id)), mention_author=False if reply_to.get(str(channel.id)) else None,
+                        )
+
                     logging.info(f"✅ 自動推播完成：地震 {eq_no} 的 30 分鐘初步統計！")
 
         except Exception as e:
             logging.error(f"❌ /dyfiReport 發生未預期的錯誤：{e}")
+            self.retry_later(retry_args)
 
 async def setup(bot):
     await bot.add_cog(DyfiReportCog(bot))

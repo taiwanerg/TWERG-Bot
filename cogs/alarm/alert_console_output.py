@@ -5,6 +5,8 @@ import sys
 import json
 import datetime
 
+CONSOLE_BACKLOG = 20000
+
 class DiscordLogHandler(logging.Handler):
     """將日誌發送到 Discord 的 Handler"""
     def __init__(self, cog):
@@ -64,13 +66,20 @@ class ConsoleOutputCog(commands.Cog):
 
             text_to_send = "".join(self.buffer)
             self.buffer.clear()
-            
+
             # Discord 訊息上限是 2000 字元，預留 ```text\n\n``` 空間分割字串
             max_length = 1980
-            for i in range(0, len(text_to_send), max_length):
-                chunk = text_to_send[i:i+max_length]
-                if chunk.strip():
+            chunks = [text_to_send[i:i+max_length] for i in range(0, len(text_to_send), max_length)]
+            for index, chunk in enumerate(chunks):
+                if not chunk.strip():
+                    continue
+                try:
                     await channel.send(f"```text\n{chunk}\n```")
+                except Exception as e:
+                    backlog = "".join(chunks[index:])[-CONSOLE_BACKLOG:]
+                    self.buffer.insert(0, backlog)
+                    print(f"❌ send_console_task 發送失敗，{len(backlog)} 字保留到下次重試: {e}")
+                    return
         except Exception as e:
             print(f"❌ send_console_task 發生錯誤: {e}")
 

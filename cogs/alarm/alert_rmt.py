@@ -6,10 +6,13 @@ import re
 import json
 from datetime import datetime, timezone, timedelta
 
+from module import outbox, push_state
+
 class RMTAutoPushCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.last_timestamp = None
+        self.last_timestamp = push_state.load("rmt").get("last_timestamp")
+        self.box = outbox.get(bot)
         self.check_rmt_task.start()
 
     def cog_unload(self):
@@ -61,12 +64,17 @@ class RMTAutoPushCog(commands.Cog):
                 
                 if self.last_timestamp is None:
                     self.last_timestamp = current_timestamp
+                    push_state.save("rmt", {"last_timestamp": current_timestamp})
                     logging.info(f"🔄 [RMT 推送] 初始載入完成，目前最新的 RMT 報告為：{self.last_timestamp}")
                     return
-                    
+
                 if current_timestamp != self.last_timestamp:
-                    logging.info(f"🚨 [RMT 推送] 發現新 RMT 報告：{current_timestamp}！準備推送...")
                     self.last_timestamp = current_timestamp
+                    push_state.save("rmt", {"last_timestamp": current_timestamp})
+                    if not push_state.fresh_utc_stamp(current_timestamp):
+                        logging.info(f"⏭️ [RMT 推送] RMT 報告 {current_timestamp} 已超過補發時限，略過")
+                        return
+                    logging.info(f"🚨 [RMT 推送] 發現新 RMT 報告：{current_timestamp}！準備推送...")
                     await self.push_rmt_report(latest_record)
                     
         except Exception as e:
@@ -107,18 +115,11 @@ class RMTAutoPushCog(commands.Cog):
                 
             channel_ids = settings.get("rmt_target_channel_ids", [])
             for channel_id in channel_ids:
-                channel = self.bot.get_channel(int(channel_id))
-                if channel:
-                    try:
-                        # 加上按鈕讓用戶可以快速點擊前往網站
-                        view = discord.ui.View()
-                        btn = discord.ui.Button(label="Real-time MT 網站", url="https://rmt.earth.sinica.edu.tw/", style=discord.ButtonStyle.link)
-                        view.add_item(btn)
-                        await channel.send(content=message_content, embed=embed, view=view)
-                    except discord.Forbidden:
-                        logging.error(f"❌ [RMT 推送] 無法發送至頻道 {channel_id}：權限不足。")
-                    except Exception as e:
-                        logging.error(f"❌ [RMT 推送] 發送至頻道 {channel_id} 失敗：{e}")
+                # 加上按鈕讓用戶可以快速點擊前往網站
+                view = discord.ui.View()
+                btn = discord.ui.Button(label="Real-time MT 網站", url="https://rmt.earth.sinica.edu.tw/", style=discord.ButtonStyle.link)
+                view.add_item(btn)
+                await self.box.send(f"rmt:{timestamp_str}:{int(channel_id)}", int(channel_id), content=message_content, embed=embed, view=view)
 
 async def setup(bot):
     await bot.add_cog(RMTAutoPushCog(bot))

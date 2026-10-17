@@ -8,12 +8,13 @@ import time
 
 import discord
 
-from module import kma_text
+from module import kma_text, outbox
 from module.kma_intensity import EMBED_COLORS, LEVEL_EMOJI, parse_level, roman
 
 STATE_DIR = "data"
 SETTINGS_FILE = "guild_settings.json"
 STATE_TTL = 3 * 86400
+OUTBOX_TTL = {"eew": 10 * 60, "report": 2 * 3600}
 
 MODE_ZH = {"지진조기경보": "地震預警", "지진속보": "地震速報", "지진정보": "地震報告"}
 
@@ -377,32 +378,43 @@ def build_message(event, mode_key, filename, analysis):
     return content, embed
 
 
-async def send_to_channels(bot, target_list, content, embed, png, filename):
+async def send_to_channels(bot, target_list, content, embed, png, filename, kind="report", record_key=None):
+    box = outbox.get(bot)
+
     async def send_one(target):
-        channel_id, roles = target["channel_id"], target["roles"]
-        channel = bot.get_channel(int(channel_id))
-        if channel is None:
-            logging.warning(f"⚠️ [KMA] 找不到頻道 {channel_id}")
-            return None
+        channel_id, roles = int(target["channel_id"]), target["roles"]
         text = f"{_mention_text(roles)}\n{content}" if roles else content
-        try:
-            msg = await channel.send(
-                content=text, embed=embed, file=discord.File(io.BytesIO(png), filename=filename),
-                allowed_mentions=_allowed(roles),
-            )
-            return [channel.id, msg.id, bool(roles)]
-        except discord.Forbidden:
-            logging.error(f"❌ [KMA] 無法發送至頻道 {channel_id}：權限不足。")
-        except Exception as e:
-            logging.error(f"❌ [KMA] 發送至頻道 {channel_id} 失敗：{e}")
-        return None
+        msg = await box.send(
+            f"kma:{filename}:{channel_id}", channel_id,
+            content=text, embed=embed, files=[(png, filename)], allowed_mentions=_allowed(roles),
+            ttl=OUTBOX_TTL.get(kind, outbox.DEFAULT_TTL), kind=f"kma_{kind}",
+            meta={"record": record_key, "roles": bool(roles)},
+        )
+        if msg is None:
+            return None
+        return [channel_id, msg.id, bool(roles)]
 
     results = await asyncio.gather(*(send_one(t) for t in target_list))
     return [r for r in results if r]
 
 
+def register_late_refs(bot, kind, state, save):
+    def on_sent(key, meta, message):
+        record = state.get((meta or {}).get("record"))
+        if record is None or message is None:
+            return
+        ref = [message.channel.id, message.id, bool(meta.get("roles"))]
+        messages = record.setdefault("messages", [])
+        if not any(int(r[0]) == ref[0] and int(r[1]) == ref[1] for r in messages):
+            messages.append(ref)
+            save()
+
+    outbox.get(bot).on_sent(f"kma_{kind}", on_sent)
+
+
 async def ping_upgrades(bot, kind, refs, event, label_ko, label_zh):
     mapping = channel_settings(kind)
+    box = outbox.get(bot)
     changed = False
 
     async def ping_one(ref):
@@ -415,22 +427,21 @@ async def ping_upgrades(bot, kind, refs, event, label_ko, label_zh):
         roles = mention_roles(kind, event, settings)
         if not roles:
             return
-        channel = bot.get_channel(int(ref[0]))
-        if channel is None:
+        key = f"kma:ping:{ref[0]}:{ref[1]}"
+        await box.send(
+            key, int(ref[0]),
+            content=f"🔔 {_mention_text(roles)}\n**{label_ko}**\n-# {label_zh}",
+            reply_to=(int(ref[0]), int(ref[1])),
+            allowed_mentions=_allowed(roles),
+            ttl=OUTBOX_TTL.get(kind, outbox.DEFAULT_TTL),
+        )
+        if box.state(key) == "dropped":
             return
-        try:
-            await channel.send(
-                content=f"🔔 {_mention_text(roles)}\n**{label_ko}**\n-# {label_zh}",
-                reference=discord.MessageReference(message_id=int(ref[1]), channel_id=int(ref[0]), fail_if_not_exists=False),
-                allowed_mentions=_allowed(roles),
-            )
-            if len(ref) > 2:
-                ref[2] = True
-            else:
-                ref.append(True)
-            changed = True
-        except Exception as e:
-            logging.error(f"❌ [KMA] 升級提及發送至頻道 {ref[0]} 失敗：{e}")
+        if len(ref) > 2:
+            ref[2] = True
+        else:
+            ref.append(True)
+        changed = True
 
     await asyncio.gather(*(ping_one(r) for r in refs))
     return changed
@@ -438,25 +449,20 @@ async def ping_upgrades(bot, kind, refs, event, label_ko, label_zh):
 
 async def edit_messages(bot, refs, content, embed, png, filename, kind=None, event=None):
     mapping = channel_settings(kind) if kind else {}
+    box = outbox.get(bot)
 
     async def edit_one(ref):
-        channel_id, message_id = ref[0], ref[1]
-        channel = bot.get_channel(int(channel_id))
-        if channel is None:
-            return
+        channel_id, message_id = int(ref[0]), int(ref[1])
         text = content
-        if len(ref) > 2 and ref[2] and event is not None and int(channel_id) in mapping:
-            roles = [int(r) for r in mapping[int(channel_id)].get(f"kma_{kind}_mention_role_ids", []) if str(r).isdigit()]
+        if len(ref) > 2 and ref[2] and event is not None and channel_id in mapping:
+            roles = [int(r) for r in mapping[channel_id].get(f"kma_{kind}_mention_role_ids", []) if str(r).isdigit()]
             if roles:
                 text = f"{_mention_text(roles)}\n{content}"
-        try:
-            await channel.get_partial_message(int(message_id)).edit(
-                content=text, embed=embed, attachments=[discord.File(io.BytesIO(png), filename=filename)],
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.NotFound:
-            logging.warning(f"⚠️ [KMA] 訊息 {message_id} 已不存在，略過更新。")
-        except Exception as e:
-            logging.error(f"❌ [KMA] 更新訊息 {message_id} 失敗：{e}")
+        await box.edit(
+            f"kma:edit:{channel_id}:{message_id}", channel_id, (channel_id, message_id),
+            content=text, embed=embed, files=[(png, filename)],
+            allowed_mentions=discord.AllowedMentions.none(),
+            ttl=OUTBOX_TTL.get(kind, outbox.DEFAULT_TTL),
+        )
 
     await asyncio.gather(*(edit_one(r) for r in refs))

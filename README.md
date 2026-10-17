@@ -12,8 +12,10 @@ Its main purpose is to automatically push [TWERG "Did You Feel It?"](https://www
 
 ### 自動推送地震報告 Automated Earthquake Report
 
-- 當有顯著有感地震發生時，自動將報告及 TWERG 體感回報連結推送到指定的伺服器頻道。
-- Automatically pushes significant earthquake reports and "Did You Feel It?" URLs to designated server channels.
+- 有感地震發生時，自動推送附震度地圖的地震報告，並回覆一則 TWERG 體感回報邀請；30 分鐘後的體感統計也會串在同一串。
+- 管理員可在 `/settings` →「TWERG 體感回報設定」開關「報告地圖」，關閉時改為純文字報告。
+- Automatically pushes significant earthquake reports with an intensity map, followed by a threaded "Did You Feel It?" invitation; the 30-minute DYFI summary joins the same thread.
+- Administrators can toggle the report map under `/settings` → "TWERG 體感回報設定"; when off, a text-only report is sent instead.
 
 ### 自訂的推送設定 Customizable Push Settings
 
@@ -34,6 +36,12 @@ Its main purpose is to automatically push [TWERG "Did You Feel It?"](https://www
 - 管理員在 `/settings` →「韓國地震 (KMA) 推送」設定，並可用 `/kma_status` 查看連線狀態；擁有者可用 `/kma_token` 更換資料連線 Token（不需重啟）。
 - 警報 tag：預警／報告可分別指定要 tag 的身分組。預設依韓國災難簡訊規則（지진조기경보一律、지진속보最大預估震度 Ⅴ 以上），後續報升級時另發 tag 訊息。
 - 斷線通知：任一 KMA 資料連線中斷超過 60 秒，通知指定頻道並 tag 指定的人或身分組，附中斷原因；可設定僅一次或每 10 分鐘提醒（最多 6 次），恢復時另行通知。
+
+### 訊息防漏 Reliable Delivery
+
+- Discord 或網路暫時中斷時，推送會自動排隊、恢復後補發；bot 重開後也會補發離線期間（2 小時內）的地震報告。
+- 開發者：新增推送功能時請使用防漏系統，接入方式見 [`module/OUTBOX_接入說明.md`](module/OUTBOX_接入說明.md)。
+- When Discord or the network is temporarily unavailable, pushes are queued and delivered once it recovers; after a restart, earthquake reports missed while offline (within 2 hours) are sent as well.
 
 ### 即時查詢 Real-time Query
 - 手動查詢最新一筆地震資料，以及 TWERG 體感回報網址。
@@ -83,6 +91,10 @@ pip install discord.py geopandas matplotlib shapely pillow
 python bot.py
 ```
 
+更新程式時請保留 `data/` 資料夾，裡面存有待發送的訊息與推送紀錄。
+
+Keep the `data/` folder when updating; it holds queued messages and push history.
+
 ## 免責聲明 / Disclaimer
 
 機器人所獲取之資料僅作為參考以及學習用途，機器人作者以及地牛記錄小組不負擔任何責任。
@@ -111,6 +123,8 @@ If you encounter any issues, please contact the BOT author.
 - [@yowoapple](https://github.com/yowoapple)（YoWoRingo）
   - 提供 TWERG 體感回報地圖相關組件
   - 開發韓國氣象廳（KMA）地震預警與地震報告推送系統：即時連線、震度推估、地圖卡、警報 tag 與斷線通知
+  - 設計中央氣象署地震報告震度地圖，並將體感回報整合為「地震報告 → 回報邀請 → 30 分鐘統計」整串推送
+  - 設計訊息防漏系統（發送佇列、自動重試補發、重開後補發離線期間的報告）
 - `easontet` 提供計算公式
 
 ## 授權 / License

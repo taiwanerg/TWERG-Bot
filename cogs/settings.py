@@ -465,6 +465,8 @@ class SettingsView(discord.ui.View):
             self.settings["render_map"] = True
         if "discord_dyfi" not in self.settings:
             self.settings["discord_dyfi"] = True
+        if "report_map" not in self.settings:
+            self.settings["report_map"] = True
 
         # 初始化時，根據目前的設定狀態來決定下拉選單各選項的「預設打勾狀態」
         for child in self.children:
@@ -478,6 +480,8 @@ class SettingsView(discord.ui.View):
                         option.default = self.settings.get("render_map", True)
                     elif option.value == "discord_dyfi":
                         option.default = self.settings.get("discord_dyfi", True)
+                    elif option.value == "report_map":
+                        option.default = self.settings.get("report_map", True)
 
     def build_embed(self) -> discord.Embed:
         """根據當前設定建立 Embed 排版"""
@@ -492,11 +496,13 @@ class SettingsView(discord.ui.View):
         auto_dyfi_status = "`🟢` 已啟用" if self.settings.get("auto_dyfi_report", True) else "`🔴` 已停用"
         render_map_status = "`🟢` 已啟用" if self.settings.get("render_map", True) else "`🔴` 已停用"
         discord_dyfi_status = "`🟢` 已啟用" if self.settings.get("discord_dyfi", True) else "`🔴` 已停用"
+        report_map_status = "`🟢` 已啟用" if self.settings.get("report_map", True) else "`🔴` 已停用"
         channel_ids = self.settings.get("target_channel_ids", [])
         channel_status = "\n".join([f"<#{c_id}>" for c_id in channel_ids]) if channel_ids else "⚠️ 尚未設定"
         min_mag = self.settings.get("min_magnitude", 4.0)
         
         embed.add_field(name="自動推送狀態", value=auto_push_status, inline=False)
+        embed.add_field(name="地震報告附震度地圖", value=report_map_status, inline=False)
         embed.add_field(name="30分鐘後初步統計", value=auto_dyfi_status, inline=False)
         embed.add_field(name="初步統計包含地圖圖片", value=f"{render_map_status}\n-# 停用不影響 /dyfi 指令", inline=False)
         embed.add_field(name="整合 Discord 體感回報", value=f"{discord_dyfi_status}\n-# 將 Discord 頻道的訊息回報納入統計與地圖中", inline=False)
@@ -508,9 +514,10 @@ class SettingsView(discord.ui.View):
     @discord.ui.select(
         placeholder="點此開啟或關閉功能 (可多選)",
         min_values=0,
-        max_values=4,
+        max_values=5,
         options=[
             discord.SelectOption(label="自動推送", value="auto_push", description="啟用自動推送地震報告", emoji="📨"),
+            discord.SelectOption(label="報告地圖", value="report_map", description="地震報告附震度地圖", emoji="🧭"),
             discord.SelectOption(label="初步統計", value="auto_dyfi_report", description="發送 30 分鐘後初步統計", emoji="🕟"),
             discord.SelectOption(label="地圖渲染", value="render_map", description="初步統計包含地圖圖片", emoji="🗺️"),
             discord.SelectOption(label="Discord 體感", value="discord_dyfi", description="整合 Discord 體感回報", emoji="💬")
@@ -523,7 +530,8 @@ class SettingsView(discord.ui.View):
         self.settings["auto_dyfi_report"] = "auto_dyfi_report" in select.values
         self.settings["render_map"] = "render_map" in select.values
         self.settings["discord_dyfi"] = "discord_dyfi" in select.values
-        
+        self.settings["report_map"] = "report_map" in select.values
+
         self.all_settings[self.guild_id] = self.settings
         save_settings(self.all_settings)
 
