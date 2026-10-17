@@ -111,6 +111,7 @@ If you encounter any issues, please contact the BOT author.
 - [@yowoapple](https://github.com/yowoapple)（YoWoRingo）
   - 提供 TWERG 體感回報地圖相關組件
   - 開發韓國氣象廳（KMA）地震預警與地震報告推送系統：即時連線、震度推估、地圖卡、警報 tag 與斷線通知
+  - 設計中央氣象署地震報告震度地圖，並將體感回報整合為「地震報告 → 回報邀請 → 30 分鐘統計」整串推送
 - `easontet` 提供計算公式
 
 ## 授權 / License
