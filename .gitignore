@@ -12,6 +12,9 @@ guild_settings.json
 /data/.matplotlib/
 /data/kma_secrets.json
 /data/kma_state_*.json
+/data/outbox.json
+/data/outbox_files/
+/data/push_state_*.json
 /data/*.tmp
 /tests/*
 !/tests/test_earthquake_revision.py

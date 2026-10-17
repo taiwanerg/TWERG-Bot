@@ -15,6 +15,7 @@ from cogs.earlyest import (
     build_event_embed,
     parse_event_table,
 )
+from module import outbox
 
 
 EARLYEST_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
@@ -35,7 +36,14 @@ class EarlyEstAutoPushCog(commands.Cog):
         self.record_signatures = {}
         self.event_messages = {}
         self.initialized = False
+        self.box = outbox.get(bot)
+        self.box.on_dropped("earlyest_edit", self.on_edit_dropped)
         self.check_earlyest_task.start()
+
+    def on_edit_dropped(self, key, meta, reason):
+        if reason == "NotFound" and meta:
+            self.event_messages.get(meta["event_id"], {}).pop(meta["channel_id"], None)
+            logging.warning("⚠️ [Early-est 推送] 事件 %s 的原訊息已被刪除。", meta["event_id"])
 
     def cog_unload(self):
         self.check_earlyest_task.cancel()
@@ -266,23 +274,18 @@ class EarlyEstAutoPushCog(commands.Cog):
         event_id = record["event_id"]
         event_messages = self.event_messages.setdefault(event_id, {})
 
-        for channel_id, (action, message) in actions.items():
+        for channel_id, (action, send_key) in actions.items():
             if action == "edit":
-                edit_succeeded = await self.edit_earlyest_message(
-                    message, record, image_bytes
+                await self.edit_earlyest_message(
+                    send_key, channel_id, record, image_bytes
                 )
-                if edit_succeeded is None:
-                    event_messages.pop(channel_id, None)
-                elif not edit_succeeded:
-                    # Force the same solution to be retried on the next poll.
-                    self.record_signatures.pop(event_id, None)
                 continue
 
-            message = await self.send_earlyest_message(channel_id, record, image_bytes)
-            if message is not None:
-                event_messages[channel_id] = message
+            send_key = await self.send_earlyest_message(channel_id, record, image_bytes)
+            if send_key is not None:
+                event_messages[channel_id] = send_key
                 logging.info(
-                    "✅ [Early-est 推送] 事件 %s 已在頻道 %s 達到 mb 門檻並發送。",
+                    "✅ [Early-est 推送] 事件 %s 已在頻道 %s 達到 mb 門檻並排入發送。",
                     event_id,
                     channel_id,
                 )
@@ -291,11 +294,6 @@ class EarlyEstAutoPushCog(commands.Cog):
             self.event_messages.pop(event_id, None)
 
     async def send_earlyest_message(self, channel_id, record, image_bytes):
-        channel = self.bot.get_channel(channel_id)
-        if channel is None:
-            logging.warning("⚠️ [Early-est 推送] 找不到頻道：%s", channel_id)
-            return None
-
         filename = f"earlyest_{record['event_id']}.jpg"
         embed = build_event_embed(
             record,
@@ -304,60 +302,32 @@ class EarlyEstAutoPushCog(commands.Cog):
         if not image_bytes:
             embed.set_image(url=None)
 
-        try:
-            kwargs = {
-                "content": build_event_content(record),
-                "embed": embed,
-                "view": self.build_report_view(record),
-            }
-            if image_bytes:
-                kwargs["file"] = discord.File(io.BytesIO(image_bytes), filename=filename)
-            return await channel.send(**kwargs)
-        except discord.Forbidden:
-            logging.error(
-                "❌ [Early-est 推送] 無法發送至頻道 %s：權限不足。",
-                channel_id,
-            )
-        except Exception as error:
-            logging.exception(
-                "❌ [Early-est 推送] 發送至頻道 %s 失敗：%s",
-                channel_id,
-                error,
-            )
-        return None
+        send_key = f"earlyest:{record['event_id']}:{channel_id}"
+        await self.box.send(
+            send_key,
+            channel_id,
+            content=build_event_content(record),
+            embed=embed,
+            view=self.build_report_view(record),
+            files=[(image_bytes, filename)] if image_bytes else None,
+        )
+        if self.box.state(send_key) == "dropped":
+            return None
+        return send_key
 
-    async def edit_earlyest_message(self, message, record, image_bytes):
+    async def edit_earlyest_message(self, send_key, channel_id, record, image_bytes):
         filename = f"earlyest_{record['event_id']}.jpg"
         embed = build_event_embed(record, image_url=f"attachment://{filename}")
-        try:
-            kwargs = {
-                "content": build_event_content(record),
-                "embed": embed,
-            }
-            if image_bytes:
-                kwargs["attachments"] = [
-                    discord.File(io.BytesIO(image_bytes), filename=filename)
-                ]
-            await message.edit(**kwargs)
-            return True
-        except discord.NotFound:
-            logging.warning(
-                "⚠️ [Early-est 推送] 事件 %s 的原訊息已被刪除。",
-                record["event_id"],
-            )
-            return None
-        except discord.Forbidden:
-            logging.error(
-                "❌ [Early-est 推送] 無法編輯事件 %s 的原訊息：權限不足。",
-                record["event_id"],
-            )
-        except Exception as error:
-            logging.exception(
-                "❌ [Early-est 推送] 編輯事件 %s 的原訊息失敗：%s",
-                record["event_id"],
-                error,
-            )
-        return False
+        await self.box.edit(
+            f"{send_key}:edit",
+            channel_id,
+            send_key,
+            content=build_event_content(record),
+            embed=embed,
+            files=[(image_bytes, filename)] if image_bytes else None,
+            kind="earlyest_edit",
+            meta={"event_id": record["event_id"], "channel_id": channel_id},
+        )
 
 
 async def setup(bot):

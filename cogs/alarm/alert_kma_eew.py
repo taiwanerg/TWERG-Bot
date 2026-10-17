@@ -18,6 +18,7 @@ class KMAEEWAlertCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.state = kma_push.load_state("eew")
+        kma_push.register_late_refs(bot, "eew", self.state, lambda: kma_push.save_state("eew", self.state))
         self.latest = {}
         self.lock = asyncio.Lock()
         self.stream = KMAStream(bot, "kma_eew", self.on_frame)
@@ -109,7 +110,7 @@ class KMAEEWAlertCog(commands.Cog):
             analysis, png = await kma_push.prepare(event, event["mode"])
             filename = f"kma_eew_{int(time.time())}.png"
             content, embed = kma_push.build_message(event, event["mode"], filename, analysis)
-            record["messages"] = await kma_push.send_to_channels(self.bot, channels, content, embed, png, filename)
+            record["messages"] = await kma_push.send_to_channels(self.bot, channels, content, embed, png, filename, kind="eew", record_key=key)
             kma_push.save_state("eew", self.state)
             logging.info(f"🚨 [KMA 預警] {event['mode']} {source}:{source_id} 第1報，已發送至 {len(record['messages'])} 個頻道")
             return
@@ -150,7 +151,7 @@ class KMAEEWAlertCog(commands.Cog):
             )
             logging.info(f"🚨 [KMA 預警] {key} 更新為第{serial}報（{source}），已編輯 {len(record['messages'])} 則訊息")
         if new_channels:
-            refs = await kma_push.send_to_channels(self.bot, new_channels, content, embed, png, filename)
+            refs = await kma_push.send_to_channels(self.bot, new_channels, content, embed, png, filename, kind="eew", record_key=key)
             record.setdefault("messages", []).extend(refs)
             logging.info(f"🚨 [KMA 預警] {key} 由 {source} 補發至 {len(refs)} 個頻道")
         kma_push.save_state("eew", self.state)

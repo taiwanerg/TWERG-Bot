@@ -9,6 +9,9 @@ import time
 import io
 
 from module.yt_chart import get_viewer_history, record_viewer_count, render_viewer_chart
+from module import outbox
+
+YT_ALERT_TTL = 15 * 60
 
 class YouTubeAlertCog(commands.Cog):
     def __init__(self, bot):
@@ -16,7 +19,8 @@ class YouTubeAlertCog(commands.Cog):
         self.video_url = None
         self.last_viewers = None
         self.last_notified = {}
-        
+        self.box = outbox.get(bot)
+
         try:
             with open('config.json', 'r', encoding='utf-8') as f:
                 config = json.load(f)
@@ -120,28 +124,25 @@ class YouTubeAlertCog(commands.Cog):
                 # 同一個伺服器的多個頻道共用一次渲染結果；每次發送仍建立獨立 File。
                 chart_data = render_viewer_chart(get_viewer_history())
                 for channel_id in channel_ids:
-                    channel = self.bot.get_channel(channel_id)
-                    if channel:
-                        try:
-                            message_content = "⚠️ 可能有地震發生？"
-                            embed = discord.Embed(
-                                description="台灣地震監視 YouTube 直播觀看人數增加", 
-                                color=0xffffff
-                                )
-                            embed.add_field(name="📈 增加人數", value=f"+{diff} 人", inline=True)
-                            embed.add_field(name="👥 目前總人數", value=f"{current_viewers} 人", inline=True)
-                            embed.add_field(name="🕓 偵測時間", value=f"<t:{int(current_time)}:f>", inline=False)
-                            embed.set_footer(text="僅供參考，實際地震資訊請以中央氣象署為準。")
-                            if chart_data:
-                                embed.set_image(url="attachment://yt_viewers.png")
-                            view = discord.ui.View()
-                            view.add_item(discord.ui.Button(label="YouTube 直播網址", url=self.video_url, style=discord.ButtonStyle.link))
-                            chart_file = discord.File(io.BytesIO(chart_data), filename="yt_viewers.png") if chart_data else None
-                            await channel.send(content=message_content, embed=embed, view=view, file=chart_file)
-                            logging.info(f"🚨 已發送 YouTube 觀看人數增加通知至頻道 {channel_id} (增加 {diff} 人)")
-                        except discord.Forbidden:
-                            logging.error(f"❌ 無法發送 YouTube 監控通知至頻道 {channel_id}：權限不足。")
-                            pass
+                    message_content = "⚠️ 可能有地震發生？"
+                    embed = discord.Embed(
+                        description="台灣地震監視 YouTube 直播觀看人數增加",
+                        color=0xffffff
+                        )
+                    embed.add_field(name="📈 增加人數", value=f"+{diff} 人", inline=True)
+                    embed.add_field(name="👥 目前總人數", value=f"{current_viewers} 人", inline=True)
+                    embed.add_field(name="🕓 偵測時間", value=f"<t:{int(current_time)}:f>", inline=False)
+                    embed.set_footer(text="僅供參考，實際地震資訊請以中央氣象署為準。")
+                    if chart_data:
+                        embed.set_image(url="attachment://yt_viewers.png")
+                    view = discord.ui.View()
+                    view.add_item(discord.ui.Button(label="YouTube 直播網址", url=self.video_url, style=discord.ButtonStyle.link))
+                    await self.box.send(
+                        f"yt:{int(current_time)}:{int(channel_id)}", int(channel_id),
+                        content=message_content, embed=embed, view=view,
+                        files=[(chart_data, "yt_viewers.png")] if chart_data else None, ttl=YT_ALERT_TTL,
+                    )
+                    logging.info(f"🚨 已排入 YouTube 觀看人數增加通知至頻道 {channel_id} (增加 {diff} 人)")
 
                 # 記錄該伺服器最後一次發送通知的時間
                 self.last_notified[guild_id] = current_time
