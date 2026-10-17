@@ -2,8 +2,20 @@ import logging
 import discord
 from discord.ext import commands, tasks
 import aiohttp
+import asyncio
+import io
 import json
 from datetime import datetime, timezone, timedelta
+
+try:
+    from module import cwa_report_map
+except ImportError:
+    cwa_report_map = None
+
+try:
+    from module.kma_push import _render_lock as render_lock
+except ImportError:
+    render_lock = asyncio.Lock()
 
 class EarthquakeAlertCog(commands.Cog):
     def __init__(self, bot):
@@ -18,6 +30,62 @@ class EarthquakeAlertCog(commands.Cog):
 
     def cog_unload(self):
         self.check_earthquake.cancel()
+
+    async def build_report_assets(self, report, need_map):
+        if cwa_report_map is None:
+            return None, None
+        data, png = None, None
+        async with render_lock:
+            try:
+                data = await asyncio.to_thread(cwa_report_map.analyze, report)
+            except Exception as e:
+                logging.warning(f"⚠️ 分析地震報告震度失敗：{e}")
+            if need_map:
+                try:
+                    buf = await asyncio.to_thread(cwa_report_map.render_report_map, report)
+                    png = buf.getvalue()
+                except Exception as e:
+                    logging.warning(f"⚠️ 繪製地震報告地圖失敗：{e}")
+        return data, png
+
+    def max_intensity_text(self, data):
+        if not data or not data.get("peak"):
+            return None
+        names = data.get("names", [])
+        shown = "、".join(names[:4])
+        if len(names) > 4:
+            shown += f" 等 {len(names)} 處"
+        return f"**{cwa_report_map.LEVEL_ZH[data['peak']]}**　{shown}".rstrip()
+
+    def build_report_embed(self, current_no, magnitude, focal_depth, discord_time, data, with_map):
+        color = 0xff3846
+        if data and data.get("peak"):
+            color = int(cwa_report_map.LEVEL_COLORS[data["peak"]].lstrip("#"), 16)
+        embed = discord.Embed(title=f"顯著有感地震報告　第 {current_no} 號", color=color)
+        intensity = self.max_intensity_text(data)
+        if with_map:
+            if intensity:
+                embed.add_field(name="最大震度", value=intensity, inline=False)
+            embed.add_field(name="發生時間", value=discord_time, inline=False)
+            embed.set_image(url="attachment://cwa_report.png")
+            return embed
+        embed.add_field(name="規模", value=f"芮氏 {magnitude}", inline=True)
+        embed.add_field(name="深度", value=f"{focal_depth} 公里", inline=True)
+        if intensity:
+            embed.add_field(name="最大震度", value=intensity, inline=False)
+        embed.add_field(name="發生時間", value=discord_time, inline=False)
+        return embed
+
+    def build_dyfi_prompt(self, report_url, auto_dyfi):
+        lines = [
+            "## 🙋 您感受到這起地震了嗎？",
+            f"# 👉 [立即回報體感](<{report_url}>) 👈",
+        ]
+        if auto_dyfi:
+            lines.append("-# 📊 30 分鐘後公布 TWERG 體感回報統計")
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="TWERG 體感回報", emoji="📝", url=report_url, style=discord.ButtonStyle.link))
+        return "\n".join(lines), view
 
     # 將 ctx 與 interaction 都作為可選參數傳入，方便回覆不同來源的觸發
     async def fetch_and_send(self, force=False, target_guild_id=None, ctx: commands.Context = None, interaction: discord.Interaction = None, push_type: str = "report"):
@@ -84,18 +152,8 @@ class EarthquakeAlertCog(commands.Cog):
                     discord_time = origin_time_str
 
                 report_url = f"https://www.twerg.org/dyfi?eq={current_no}"
-                message_content = f"# 📃 體感回報填寫（{current_no}）"
-                
-                embed = discord.Embed(title="顯著有感地震報告", description=report_url, color=0xff3846)
-                embed.add_field(name="編號", value=str(current_no), inline=True)
-                embed.add_field(name="規模", value=f"芮氏 {magnitude}", inline=True)
-                embed.add_field(name="深度", value=f"{focal_depth} 公里", inline=True)
-                embed.add_field(name="發生時間", value=discord_time, inline=False)
-                
-                view = discord.ui.View()
-                button = discord.ui.Button(label="TWERG 體感回報網頁", url=report_url, style=discord.ButtonStyle.link)
-                view.add_item(button)
-                
+                message_content = f"# 📃 地震報告（{current_no}）"
+
                 # 讀取各伺服器的獨立設定
                 try:
                     with open('guild_settings.json', 'r', encoding='utf-8') as f:
@@ -125,8 +183,18 @@ class EarthquakeAlertCog(commands.Cog):
                         await reply_message("⚠️ 未推送，沒有 TWERG 體感回報資料")
                         return
 
+                report_data, report_png = None, None
+                if push_type == "report":
+                    need_map = any(
+                        s.get("auto_push") and s.get("report_map", True) and mag_val >= s.get("min_magnitude", 4.0)
+                        and (not target_guild_id or str(g) == str(target_guild_id))
+                        for g, s in guild_settings.items()
+                    )
+                    report_data, report_png = await self.build_report_assets(latest_earthquake, need_map)
+
                 pushed_channels = []
                 dyfi_scheduled_channels = []
+                dyfi_reply_ids = {}
                 # 依據各伺服器設定決定是否發送與發送目標
                 for guild_id, settings in guild_settings.items():
                     # 若有指定目標伺服器，則跳過非目標的伺服器
@@ -152,19 +220,39 @@ class EarthquakeAlertCog(commands.Cog):
                         
                     if not channel_ids:
                         continue
-                        
+
+                    with_map = report_png is not None and settings.get("report_map", True)
+                    embed = self.build_report_embed(current_no, magnitude, focal_depth, discord_time, report_data, with_map)
+                    prompt_content, prompt_view = self.build_dyfi_prompt(report_url, auto_dyfi)
+
                     for channel_id in channel_ids:
                         channel = self.bot.get_channel(channel_id)
                         if channel:
                             if push_type == "report":
                                 try:
-                                    await channel.send(content=message_content, embed=embed, view=view)
+                                    if with_map:
+                                        report_file = discord.File(io.BytesIO(report_png), filename="cwa_report.png")
+                                        report_msg = await channel.send(content=message_content, embed=embed, file=report_file)
+                                    else:
+                                        report_msg = await channel.send(content=message_content, embed=embed)
                                     if channel not in pushed_channels:
                                         pushed_channels.append(channel)
-                                    if auto_dyfi and channel not in dyfi_scheduled_channels:
-                                        dyfi_scheduled_channels.append(channel)
                                 except discord.Forbidden:
                                     logging.error(f"❌ 無法發送至頻道 {channel_id}：權限不足。")
+                                    continue
+                                try:
+                                    prompt_msg = await channel.send(
+                                        content=prompt_content,
+                                        view=prompt_view,
+                                        reference=discord.MessageReference(message_id=report_msg.id, channel_id=channel.id, fail_if_not_exists=False),
+                                        mention_author=False,
+                                    )
+                                    if auto_dyfi:
+                                        dyfi_reply_ids[channel.id] = prompt_msg.id
+                                except discord.HTTPException as e:
+                                    logging.error(f"❌ 發送體感回報邀請至頻道 {channel_id} 失敗：{e}")
+                                if auto_dyfi and channel not in dyfi_scheduled_channels:
+                                    dyfi_scheduled_channels.append(channel)
                             elif push_type == "dyfi":
                                 if channel not in pushed_channels:
                                     pushed_channels.append(channel)
@@ -174,7 +262,7 @@ class EarthquakeAlertCog(commands.Cog):
                 if pushed_channels:
                     if push_type == "report":
                         if dyfi_scheduled_channels:
-                            self.bot.dispatch("earthquake_pushed", current_no, dyfi_scheduled_channels, str(magnitude), str(focal_depth), origin_time_str, epicenter)
+                            self.bot.dispatch("earthquake_pushed", current_no, dyfi_scheduled_channels, str(magnitude), str(focal_depth), origin_time_str, epicenter, dyfi_reply_ids)
                     elif push_type == "dyfi":
                         self.bot.dispatch("force_dyfi_report", current_no, pushed_channels, str(magnitude), str(focal_depth), origin_time_str, epicenter)
                         
