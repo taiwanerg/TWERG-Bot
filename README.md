@@ -12,8 +12,10 @@ Its main purpose is to automatically push [TWERG "Did You Feel It?"](https://www
 
 ### 自動推送地震報告 Automated Earthquake Report
 
-- 當有顯著有感地震發生時，自動將報告及 TWERG 體感回報連結推送到指定的伺服器頻道。
-- Automatically pushes significant earthquake reports and "Did You Feel It?" URLs to designated server channels.
+- 有感地震發生時，自動推送附震度地圖的地震報告，並回覆一則 TWERG 體感回報邀請；30 分鐘後的體感統計也會串在同一串。
+- 管理員可在 `/settings` →「TWERG 體感回報設定」開關「報告地圖」，關閉時改為純文字報告。
+- Automatically pushes significant earthquake reports with an intensity map, followed by a threaded "Did You Feel It?" invitation; the 30-minute DYFI summary joins the same thread.
+- Administrators can toggle the report map under `/settings` → "TWERG 體感回報設定"; when off, a text-only report is sent instead.
 
 ### 自訂的推送設定 Customizable Push Settings
 
@@ -111,6 +113,7 @@ If you encounter any issues, please contact the BOT author.
 - [@yowoapple](https://github.com/yowoapple)（YoWoRingo）
   - 提供 TWERG 體感回報地圖相關組件
   - 開發韓國氣象廳（KMA）地震預警與地震報告推送系統：即時連線、震度推估、地圖卡、警報 tag 與斷線通知
+  - 設計中央氣象署地震報告震度地圖，並將體感回報整合為「地震報告 → 回報邀請 → 30 分鐘統計」整串推送
 - `easontet` 提供計算公式
 
 ## 授權 / License

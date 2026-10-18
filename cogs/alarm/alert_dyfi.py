@@ -25,7 +25,7 @@ class DyfiReportCog(commands.Cog):
         self.scheduled_eqs = set()
 
     @commands.Cog.listener()
-    async def on_earthquake_pushed(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", epicenter: dict = None):
+    async def on_earthquake_pushed(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", epicenter: dict = None, reply_to: dict = None):
         # 檢查是否已經在倒數中
         if eq_no in self.scheduled_eqs:
             logging.warning(f"⚠️ 地震 {eq_no} 的 TWERG 體感回報已在排程中，略過重複觸發。")
@@ -35,14 +35,14 @@ class DyfiReportCog(commands.Cog):
         logging.info(f"⏳ 已排程地震 {eq_no} 的 TWERG 體感回報，將在 30 分鐘後發送...")
         
         # 將等待與發送的工作建立為背景任務，不阻塞目前的事件處理
-        self.bot.loop.create_task(self.send_dyfi_report(eq_no, channels, magnitude, depth, origin_time, delay=1800, epicenter=epicenter))
+        self.bot.loop.create_task(self.send_dyfi_report(eq_no, channels, magnitude, depth, origin_time, delay=1800, epicenter=epicenter, reply_to=reply_to))
 
     @commands.Cog.listener()
     async def on_force_dyfi_report(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", epicenter: dict = None):
         logging.info(f"🚨 管理員強制推送了地震 {eq_no} 的 TWERG 體感回報！")
         self.bot.loop.create_task(self.send_dyfi_report(eq_no, channels, magnitude, depth, origin_time, delay=0, epicenter=epicenter))
 
-    async def send_dyfi_report(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", delay: int = 1800, epicenter: dict = None):
+    async def send_dyfi_report(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", delay: int = 1800, epicenter: dict = None, reply_to: dict = None):
         if delay > 0:
             await asyncio.sleep(delay)
             self.scheduled_eqs.discard(eq_no) # 倒數結束，從清單移除
@@ -191,14 +191,20 @@ class DyfiReportCog(commands.Cog):
                         view.add_item(btn_url)
                         view.add_item(btn_recent)
                         
+                        thread_kwargs = {}
+                        if reply_to and channel.id in reply_to:
+                            thread_kwargs = {
+                                "reference": discord.MessageReference(message_id=reply_to[channel.id], channel_id=channel.id, fail_if_not_exists=False),
+                                "mention_author": False,
+                            }
                         try:
                             send_embed = channel_embed.copy()
                             if channel_map_bytes and should_render_map:
                                 map_file = discord.File(fp=io.BytesIO(channel_map_bytes), filename="dyfi_map.png")
                                 send_embed.set_image(url="attachment://dyfi_map.png")
-                                await channel.send(content=message_content, embed=send_embed, view=view, file=map_file)
+                                await channel.send(content=message_content, embed=send_embed, view=view, file=map_file, **thread_kwargs)
                             else:
-                                await channel.send(content=message_content, embed=send_embed, view=view)
+                                await channel.send(content=message_content, embed=send_embed, view=view, **thread_kwargs)
                         except discord.Forbidden:
                             logging.error(f"❌ 無法發送體感報告至頻道 {channel.id}：權限不足。")
                         except Exception as e:
