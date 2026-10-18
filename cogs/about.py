@@ -45,7 +45,7 @@ class AboutCog(commands.Cog):
             value=self.version,
             inline=False
         )
-        embed.set_footer(text="作者 Kuuchi (kuuchi) • Support by TWERG", icon_url="https://avatars.githubusercontent.com/u/15816531?v=4")
+        embed.set_footer(text="作者 TWERG", icon_url="https://avatars.githubusercontent.com/u/335007435?v=4")
         
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="地牛記錄小組", emoji="<:Logo_white:1503678586845003828>", url="https://www.twerg.org", style=discord.ButtonStyle.link))
