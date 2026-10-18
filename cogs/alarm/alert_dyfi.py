@@ -34,27 +34,35 @@ class DyfiReportCog(commands.Cog):
         return [int(getattr(c, "id", c)) for c in channels]
 
     @commands.Cog.listener()
-    async def on_earthquake_pushed(self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知", origin_time: str = "未知", epicenter: dict = None, reply_to: dict = None):
+    async def on_earthquake_pushed(
+        self, eq_no: str, channels: list, magnitude: str = "未知", depth: str = "未知",
+        origin_time: str = "未知", epicenter: dict = None, reply_to: dict = None,
+        delay: int = None, key_suffix: str = "",
+    ):
+        delay = DYFI_DELAY if delay is None else max(0, int(delay))
         args = {
             "eq_no": str(eq_no), "channels": self.channel_ids(channels), "magnitude": magnitude, "depth": depth,
             "origin_time": origin_time, "epicenter": epicenter, "reply_to": reply_to or {}, "attempt": 0,
+            "key_suffix": key_suffix,
         }
-        if not self.box.schedule(f"dyfi:{eq_no}", "dyfi_report", time.time() + DYFI_DELAY, args):
+        if not self.box.schedule(f"dyfi:{eq_no}{key_suffix}", "dyfi_report", time.time() + delay, args):
             logging.warning(f"⚠️ 地震 {eq_no} 的 TWERG 體感回報已在排程中，略過重複觸發。")
             return
-        logging.info(f"⏳ 已排程地震 {eq_no} 的 TWERG 體感回報，將在 30 分鐘後發送...")
+        logging.info(f"⏳ 已排程地震 {eq_no} 的 TWERG 體感回報，將在 {delay} 秒後發送...")
 
     def run_scheduled(self, args):
         self.bot.loop.create_task(self.send_dyfi_report(
             args["eq_no"], args["channels"], args["magnitude"], args["depth"], args["origin_time"],
             delay=0, epicenter=args.get("epicenter"), reply_to=args.get("reply_to"), retry_args=args,
+            key_suffix=args.get("key_suffix", ""),
         ))
 
     def retry_later(self, args):
         if args is None or args.get("attempt", 0) >= FETCH_RETRY_LIMIT:
             return
         args = dict(args, attempt=args.get("attempt", 0) + 1)
-        self.box.schedule(f"dyfi:{args['eq_no']}:retry{args['attempt']}", "dyfi_report", time.time() + FETCH_RETRY_DELAY, args)
+        key_suffix = args.get("key_suffix", "")
+        self.box.schedule(f"dyfi:{args['eq_no']}{key_suffix}:retry{args['attempt']}", "dyfi_report", time.time() + FETCH_RETRY_DELAY, args)
         logging.info(f"⏳ 地震 {args['eq_no']} 的 TWERG 體感回報資料暫時取不到，{FETCH_RETRY_DELAY // 60} 分鐘後重試（第 {args['attempt']} 次）")
 
     @commands.Cog.listener()
@@ -66,7 +74,17 @@ class DyfiReportCog(commands.Cog):
         if delay > 0:
             await asyncio.sleep(delay)
 
-        channels = [c for c in (self.bot.get_channel(i) for i in self.channel_ids(channels)) if c is not None]
+        resolved_channels = []
+        for channel_id in self.channel_ids(channels):
+            channel = self.bot.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(channel_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    logging.warning(f"⚠️ 找不到頻道 {channel_id}，或機器人沒有存取權限。")
+                    continue
+            resolved_channels.append(channel)
+        channels = resolved_channels
         reply_to = reply_to or {}
 
         try:

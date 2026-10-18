@@ -31,6 +31,7 @@ class HelpView(discord.ui.View):
         embed_owner.add_field(name="/guilds", value="🤖 顯示機器人加入的伺服器列表與活躍狀態", inline=False)
         embed_owner.add_field(name="/leave", value="🚪 強制退出指定的伺服器", inline=False)
         embed_owner.add_field(name="/broadcast", value="📢 對所有開啟自動推送的伺服器發送廣播", inline=False)
+        embed_owner.add_field(name="/force_push_test", value="🧪 強制推送最新地震報告，並自訂初步統計延遲", inline=False)
         embed_owner.add_field(name="/kma_token", value="🔑 設定韓國氣象廳 (KMA) 資料連線 Token（不需重啟）", inline=False)
         embed_owner.add_field(name="/shutdown", value="🛑 關閉 BOT", inline=False)
         embed_owner.add_field(name="/restart", value="🔄 重新啟動機器人", inline=False)

@@ -1,6 +1,7 @@
 import logging
 import discord
 from discord.ext import commands, tasks
+from discord import app_commands
 import aiohttp
 import asyncio
 import json
@@ -8,6 +9,7 @@ import time
 from datetime import datetime, timezone, timedelta
 
 from module import outbox, push_state
+from module.ownercheck import is_owner
 
 try:
     from module import cwa_report_map
@@ -79,19 +81,26 @@ class EarthquakeAlertCog(commands.Cog):
         embed.add_field(name="發生時間", value=discord_time, inline=False)
         return embed
 
-    def build_dyfi_prompt(self, report_url, auto_dyfi):
+    def build_dyfi_prompt(self, report_url, auto_dyfi, delay=None):
         lines = [
             "## 🙋 您感受到這起地震了嗎？",
             f"# 👉 [立即回報體感](<{report_url}>) 👈",
         ]
         if auto_dyfi:
-            lines.append("-# 📊 30 分鐘後公布 TWERG 體感回報統計")
+            if delay is None or delay == 1800:
+                lines.append("-# 📊 30 分鐘後公布 TWERG 體感回報統計")
+            else:
+                lines.append(f"-# 📊 {max(0, int(delay))} 秒後公布 TWERG 體感回報統計")
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="TWERG 體感回報", emoji="📝", url=report_url, style=discord.ButtonStyle.link))
         return "\n".join(lines), view
 
     # 將 ctx 與 interaction 都作為可選參數傳入，方便回覆不同來源的觸發
-    async def fetch_and_send(self, force=False, target_guild_id=None, ctx: commands.Context = None, interaction: discord.Interaction = None, push_type: str = "report"):
+    async def fetch_and_send(
+        self, force=False, target_guild_id=None, ctx: commands.Context = None,
+        interaction: discord.Interaction = None, push_type: str = "report",
+        target_channel_ids=None, dyfi_delay=None,
+    ):
         url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/E-A0015-001?Authorization={self.api_key}&format=JSON"
 
         # 定義一個輔助函數，用來處理回覆訊息，相容傳統與斜線指令
@@ -120,7 +129,10 @@ class EarthquakeAlertCog(commands.Cog):
                 reports = self.pick_new_reports(earthquakes)
 
             for latest_earthquake in reports:
-                await self.push_report(latest_earthquake, force, target_guild_id, push_type, reply_message)
+                await self.push_report(
+                    latest_earthquake, force, target_guild_id, push_type, reply_message,
+                    target_channel_ids=target_channel_ids, dyfi_delay=dyfi_delay,
+                )
 
         except Exception as e:
             await reply_message(f"❌ 發生錯誤：{e}")
@@ -184,10 +196,13 @@ class EarthquakeAlertCog(commands.Cog):
             logging.info(f"📮 補發離線期間的地震報告：{', '.join(str(r.get('EarthquakeNo')) for r in picked)}")
         return picked
 
-    async def push_report(self, latest_earthquake, force, target_guild_id, push_type, reply_message):
+    async def push_report(
+        self, latest_earthquake, force, target_guild_id, push_type, reply_message,
+        target_channel_ids=None, dyfi_delay=None,
+    ):
         current_no = latest_earthquake.get('EarthquakeNo')
         box = outbox.get(self.bot)
-        key_suffix = f":{int(time.time())}" if force else ""
+        key_suffix = f":{time.time_ns()}" if force else ""
 
         eq_info = latest_earthquake.get('EarthquakeInfo', {})
         origin_time_str = eq_info.get('OriginTime', '')
@@ -235,78 +250,87 @@ class EarthquakeAlertCog(commands.Cog):
                 await reply_message("⚠️ 未推送，沒有 TWERG 體感回報資料")
                 return
 
+        targets = []
+        seen_channel_ids = set()
+        if target_channel_ids is not None:
+            # 測試目標繞過自動推送開關與規模門檻，但仍沿用所屬伺服器的顯示設定。
+            for raw_channel_id in target_channel_ids:
+                channel_id = int(raw_channel_id)
+                if channel_id in seen_channel_ids:
+                    continue
+                channel = self.bot.get_channel(channel_id)
+                if channel is None:
+                    channel = await self.bot.fetch_channel(channel_id)
+                guild = getattr(channel, "guild", None)
+                settings = guild_settings.get(str(guild.id), {}) if guild else {}
+                targets.append((channel_id, settings, True))
+                seen_channel_ids.add(channel_id)
+        else:
+            for guild_id, settings in guild_settings.items():
+                if target_guild_id and str(guild_id) != str(target_guild_id):
+                    continue
+                if not settings.get("auto_push"):
+                    continue
+                if mag_val < settings.get("min_magnitude", 4.0):
+                    continue
+
+                channel_ids = list(settings.get("target_channel_ids", []))
+                legacy_id = settings.get("target_channel_id")
+                if legacy_id and legacy_id not in channel_ids:
+                    channel_ids.append(legacy_id)
+                for raw_channel_id in channel_ids:
+                    channel_id = int(raw_channel_id)
+                    if channel_id in seen_channel_ids:
+                        continue
+                    targets.append((channel_id, settings, settings.get("auto_dyfi_report", True)))
+                    seen_channel_ids.add(channel_id)
+
         report_data, report_png = None, None
         if push_type == "report":
-            need_map = any(
-                s.get("auto_push") and s.get("report_map", True) and mag_val >= s.get("min_magnitude", 4.0)
-                and (not target_guild_id or str(g) == str(target_guild_id))
-                for g, s in guild_settings.items()
-            )
+            need_map = any(settings.get("report_map", True) for _, settings, _ in targets)
             report_data, report_png = await self.build_report_assets(latest_earthquake, need_map)
 
         pushed_channels = []
         dyfi_scheduled_channels = []
         dyfi_reply_keys = {}
-        # 依據各伺服器設定決定是否發送與發送目標
-        for guild_id, settings in guild_settings.items():
-            # 若有指定目標伺服器，則跳過非目標的伺服器
-            if target_guild_id and str(guild_id) != str(target_guild_id):
-                continue
-
-            # 若未開啟自動推送，則跳過
-            if not settings.get("auto_push"):
-                continue
-
-            # 檢查規模是否達標
-            if mag_val < settings.get("min_magnitude", 4.0):
-                continue
-
-            # 是否發送30分鐘後初步統計 (預設開啟)
-            auto_dyfi = settings.get("auto_dyfi_report", True)
-
-            # 兼容新舊版設定，使用 target_channel_ids
-            channel_ids = settings.get("target_channel_ids", [])
-            legacy_id = settings.get("target_channel_id")
-            if legacy_id and legacy_id not in channel_ids:
-                channel_ids.append(legacy_id)
-
-            if not channel_ids:
-                continue
-
+        # 依目標頻道的伺服器設定，沿用正式推送的訊息產生與發送流程。
+        for channel_id, settings, auto_dyfi in targets:
             with_map = report_png is not None and settings.get("report_map", True)
             embed = self.build_report_embed(current_no, magnitude, focal_depth, discord_time, report_data, with_map)
-            prompt_content, prompt_view = self.build_dyfi_prompt(report_url, auto_dyfi)
+            prompt_content, prompt_view = self.build_dyfi_prompt(report_url, auto_dyfi, dyfi_delay)
 
-            for channel_id in channel_ids:
-                channel_id = int(channel_id)
-                if push_type == "report":
-                    report_key = f"cwa:{current_no}:{channel_id}:report{key_suffix}"
-                    prompt_key = f"cwa:{current_no}:{channel_id}:prompt{key_suffix}"
-                    await box.send(
-                        report_key, channel_id, content=message_content, embed=embed,
-                        files=[(report_png, "cwa_report.png")] if with_map else None,
-                    )
-                    if box.state(report_key) == "dropped":
-                        continue
-                    await box.send(
-                        prompt_key, channel_id, content=prompt_content, view=prompt_view,
-                        reply_to=report_key, mention_author=False,
-                    )
-                    if channel_id not in pushed_channels:
-                        pushed_channels.append(channel_id)
-                    if auto_dyfi and channel_id not in dyfi_scheduled_channels:
-                        dyfi_scheduled_channels.append(channel_id)
-                        dyfi_reply_keys[str(channel_id)] = prompt_key
-                elif push_type == "dyfi":
-                    if self.bot.get_channel(channel_id) is None:
-                        logging.warning(f"⚠️ 找不到頻道 {channel_id}。")
-                    elif channel_id not in pushed_channels:
-                        pushed_channels.append(channel_id)
+            if push_type == "report":
+                report_key = f"cwa:{current_no}:{channel_id}:report{key_suffix}"
+                prompt_key = f"cwa:{current_no}:{channel_id}:prompt{key_suffix}"
+                await box.send(
+                    report_key, channel_id, content=message_content, embed=embed,
+                    files=[(report_png, "cwa_report.png")] if with_map else None,
+                )
+                if box.state(report_key) == "dropped":
+                    continue
+                await box.send(
+                    prompt_key, channel_id, content=prompt_content, view=prompt_view,
+                    reply_to=report_key, mention_author=False,
+                )
+                if channel_id not in pushed_channels:
+                    pushed_channels.append(channel_id)
+                if auto_dyfi and channel_id not in dyfi_scheduled_channels:
+                    dyfi_scheduled_channels.append(channel_id)
+                    dyfi_reply_keys[str(channel_id)] = prompt_key
+            elif push_type == "dyfi":
+                if self.bot.get_channel(channel_id) is None:
+                    logging.warning(f"⚠️ 找不到頻道 {channel_id}。")
+                elif channel_id not in pushed_channels:
+                    pushed_channels.append(channel_id)
 
         if pushed_channels:
             if push_type == "report":
                 if dyfi_scheduled_channels:
-                    self.bot.dispatch("earthquake_pushed", current_no, dyfi_scheduled_channels, str(magnitude), str(focal_depth), origin_time_str, epicenter, dyfi_reply_keys)
+                    self.bot.dispatch(
+                        "earthquake_pushed", current_no, dyfi_scheduled_channels, str(magnitude),
+                        str(focal_depth), origin_time_str, epicenter, dyfi_reply_keys,
+                        dyfi_delay, key_suffix,
+                    )
             elif push_type == "dyfi":
                 self.bot.dispatch("force_dyfi_report", current_no, pushed_channels, str(magnitude), str(focal_depth), origin_time_str, epicenter)
 
@@ -318,6 +342,9 @@ class EarthquakeAlertCog(commands.Cog):
                 logging.info(f"🚨 管理員手動推送了地震 {current_no} 的 TWERG 體感回報")
             else:
                 logging.info(f"🚨 管理員手動推送了地震報告：{current_no}")
+            if target_channel_ids is not None:
+                msg += f"\n📍 目標頻道：<#{int(target_channel_ids[0])}>"
+                msg += f"\n⏱️ 初步統計延遲：{max(0, int(dyfi_delay or 0))} 秒"
             await reply_message(msg)
         else:
             logging.info(f"🚨 自動推播完成：發現新地震報告 {current_no}，共排入 {len(pushed_channels)} 個頻道")
@@ -329,6 +356,48 @@ class EarthquakeAlertCog(commands.Cog):
     @check_earthquake.before_loop
     async def before_check_earthquake(self):
         await self.bot.wait_until_ready()
+
+    @app_commands.command(name="force_push_test", description="（限擁有者）強制推送最新地震報告與測試用初步統計")
+    @app_commands.describe(
+        channel_id="地震報告與初步統計的目標頻道 ID",
+        seconds="初步統計的延遲秒數（0 為盡快發送）",
+    )
+    async def force_push_test(self, interaction: discord.Interaction, channel_id: str, seconds: int):
+        if not is_owner(interaction.user.id):
+            await interaction.response.send_message("❌ 你沒有權限使用此指令。", ephemeral=True)
+            return
+        if seconds < 0:
+            await interaction.response.send_message("❌ `seconds` 不能小於 0。", ephemeral=True)
+            return
+
+        normalized_channel_id = channel_id.strip()
+        if normalized_channel_id.startswith("<#") and normalized_channel_id.endswith(">"):
+            normalized_channel_id = normalized_channel_id[2:-1]
+        try:
+            target_channel_id = int(normalized_channel_id)
+        except ValueError:
+            await interaction.response.send_message("❌ `channel_id` 格式錯誤，必須是頻道 ID。", ephemeral=True)
+            return
+
+        try:
+            channel = self.bot.get_channel(target_channel_id)
+            if channel is None:
+                channel = await self.bot.fetch_channel(target_channel_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await interaction.response.send_message("❌ 找不到該頻道，或機器人沒有存取權限。", ephemeral=True)
+            return
+
+        if getattr(channel, "guild", None) is None or not hasattr(channel, "send"):
+            await interaction.response.send_message("❌ 目標必須是機器人可發送訊息的伺服器頻道。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self.fetch_and_send(
+            force=True,
+            interaction=interaction,
+            target_channel_ids=[target_channel_id],
+            dyfi_delay=seconds,
+        )
 
 async def setup(bot):
     await bot.add_cog(EarthquakeAlertCog(bot))
