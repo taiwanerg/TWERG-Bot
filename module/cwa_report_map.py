@@ -63,7 +63,14 @@ LEVEL_TEXT = {k: (WHITE if k in ("3", "6-", "6+", "7") else INK) for k in LEVELS
 LEVEL_ZH = {"0": "0級", "1": "1級", "2": "2級", "3": "3級", "4": "4級", "5-": "5弱", "5+": "5強", "6-": "6弱", "6+": "6強", "7": "7級"}
 
 SAFE = (300, 150, W - 60, H - 80)
+SAFE_WIDE = (300, 30, W - 40, H - 74)
+PAD = 0.12
+PAD_WIDE = 0.04
 MIN_SPAN = (200.0, 130.0)
+COUNTY_ORDER = ["基隆市", "台北市", "新北市", "桃園市", "新竹市", "新竹縣", "苗栗縣", "台中市", "彰化縣", "南投縣", "雲林縣",
+                "嘉義市", "嘉義縣", "台南市", "高雄市", "屏東縣", "宜蘭縣", "花蓮縣", "台東縣", "澎湖縣", "金門縣", "連江縣"]
+FOCUS_COVER = 0.8
+LIST_SEA = 0.9
 MAX_NAMES = 4
 FOCUS_MIN = 6
 WIDE_FROM = "5-"
@@ -254,25 +261,56 @@ def analyze(report):
             tops.sort(key=lambda i: base["towns"][i]["geom"].centroid.distance(Point(*epi_xy)))
         names = [base["towns"][i]["county"] + base["towns"][i]["town"] for i in tops]
         names += [c for c, o in outer.items() if o[0] == peak]
-    points = []
+    focus, strong = [], []
     if towns:
-        top = max(_rank(lv) for lv in towns.values())
-        if top >= _rank(WIDE_FROM):
-            focus = [i for i, lv in towns.items() if _rank(lv) >= _rank(WIDE_FLOOR)]
-        else:
-            floor = max(1, top - 1)
-            while True:
-                focus = [i for i, lv in towns.items() if _rank(lv) >= floor]
-                if len(focus) >= FOCUS_MIN or floor <= 1:
-                    break
-                floor -= 1
-        for i in focus:
+        floor = max(1, max(_rank(lv) for lv in towns.values()) - 1)
+        while True:
+            focus = [i for i, lv in towns.items() if _rank(lv) >= floor]
+            if len(focus) >= FOCUS_MIN or floor <= 1:
+                break
+            floor -= 1
+        strong = [i for i, lv in towns.items() if _rank(lv) >= _rank(WIDE_FLOOR)] or list(towns)
+
+    def rep(ids):
+        out = []
+        for i in ids:
             rp = base["towns"][i]["geom"].representative_point()
-            points.append((rp.x, rp.y))
-    return {"towns": towns, "outer": outer, "points": points, "epi": epi_xy, "peak": peak, "names": names}
+            out.append((rp.x, rp.y))
+        return out
+
+    return {
+        "towns": towns, "outer": outer, "epi": epi_xy, "peak": peak, "names": names,
+        "focus_points": rep(focus), "wide_points": rep(strong),
+        "strong": peak is not None and _rank(peak) >= _rank(WIDE_FROM),
+    }
 
 
-def _extent(points, epi):
+def choose_view(data):
+    if not data["strong"]:
+        return "focus"
+    left, top, scale = _extent(data["focus_points"], data["epi"])
+    sl, st, sr, sb = SAFE
+    x0, x1 = left + sl / scale, left + sr / scale
+    y0, y1 = top + st / scale, top + sb / scale
+    pts = data["wide_points"]
+    inside = sum(1 for x, y in pts if x0 <= x <= x1 and y0 <= y <= y1)
+    return "focus" if pts and inside / len(pts) >= FOCUS_COVER else "wide"
+
+
+def _county_groups(base, data):
+    best = {}
+    for idx, level in data["towns"].items():
+        county = base["towns"][idx]["county"].replace("臺", "台")
+        if county not in best or _rank(level) > _rank(best[county]):
+            best[county] = level
+    order = {name: i for i, name in enumerate(COUNTY_ORDER)}
+    groups = {}
+    for county in sorted(best, key=lambda n: order.get(n, len(order))):
+        groups.setdefault(best[county], []).append(county)
+    return sorted(groups.items(), key=lambda kv: -_rank(kv[0]))
+
+
+def _extent(points, epi, wide=False):
     pts = list(points)
     if epi is not None:
         pts.append(epi)
@@ -281,8 +319,9 @@ def _extent(points, epi):
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
-    pad_x = max((x1 - x0) * 0.12, 14)
-    pad_y = max((y1 - y0) * 0.12, 14)
+    pad = PAD_WIDE if wide else PAD
+    pad_x = max((x1 - x0) * pad, 14)
+    pad_y = max((y1 - y0) * pad, 14)
     x0, x1, y0, y1 = x0 - pad_x, x1 + pad_x, y0 - pad_y, y1 + pad_y
     if x1 - x0 < MIN_SPAN[0]:
         c = (x0 + x1) / 2
@@ -290,7 +329,7 @@ def _extent(points, epi):
     if y1 - y0 < MIN_SPAN[1]:
         c = (y0 + y1) / 2
         y0, y1 = c - MIN_SPAN[1] / 2, c + MIN_SPAN[1] / 2
-    sl, st, sr, sb = SAFE
+    sl, st, sr, sb = SAFE_WIDE if wide else SAFE
     scale = min((sr - sl) / (x1 - x0), (sb - st) / (y1 - y0))
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     left = cx - ((sl + sr) / 2) / scale
@@ -471,6 +510,39 @@ def _draw_header(c, report, data):
     return (bar_x, bar_y, bar_r, header_bottom), (box_x, box_y, box_x + box_w, y)
 
 
+def _draw_counties(c, groups, top):
+    x0, w = 24, 248
+    tile, line_h, name_size = 34, 30, 21
+    limit = H - 24
+    y = top + 12
+    c.rect(x0, y, w, 34, LAVENDER, edge=NAVY, lw=1.2, z=40)
+    c.text(x0 + 14, y + 24, "各縣市最大震度", 19, color=NAVY, weight="bold", z=41)
+    y += 34
+    avail = w - tile - 30
+    for i, (level, counties) in enumerate(groups):
+        lines, cur, cur_w = [], [], 0.0
+        for name in counties:
+            t = c.text(0, 0, name, name_size, color=WHITE, weight="bold", z=41)
+            nw = c.width(t)
+            t.remove()
+            if cur and cur_w + 10 + nw > avail:
+                lines.append(cur)
+                cur, cur_w = [], 0.0
+            cur_w += (10 if cur else 0) + nw
+            cur.append(name)
+        if cur:
+            lines.append(cur)
+        gh = max(tile + 12, len(lines) * line_h + 14)
+        if y + gh > limit:
+            break
+        c.rect(x0, y, w, gh, NAVY if i % 2 == 0 else NAVY_2, edge="#0A1236", lw=1.0, z=40)
+        _tile(c, x0 + 10 + tile / 2, y + 6 + tile / 2, tile, level, z=41)
+        for j, row in enumerate(lines):
+            c.text(x0 + tile + 22, y + 7 + line_h * j + 22, "  ".join(row), name_size, color=WHITE, weight="bold", z=41)
+        y += gh
+    return (x0, top, x0 + w, y)
+
+
 def _draw_footer(c, report):
     no = report.get("EarthquakeNo")
     text = f"資料  中央氣象署  第 {no} 號地震報告" if no else "資料  中央氣象署"
@@ -593,11 +665,29 @@ def _draw_watermark(c, epi_px, blocks, tiles, size, base, data, view):
     label.set_position((cx, top + h + 34))
 
 
-def render_report_map(report, output=None):
+def _sea_share(base, view, box, step=16):
+    left, top, scale = view
+    x0, y0, x1, y1 = box
+    hits = total = 0
+    for py in range(int(y0), int(y1), step):
+        for px in range(int(x0), int(x1), step):
+            total += 1
+            if not base["land"].contains(Point(left + px / scale, top + py / scale)):
+                hits += 1
+    return hits / total if total else 0.0
+
+
+def _list_height(groups):
+    return 46 + sum(max(46, ((len(counties) + 1) // 2) * 30 + 14) for _, counties in groups)
+
+
+def render_report_map(report, output=None, view="auto"):
     _register_fonts()
     base = _basemap()
     data = analyze(report)
-    left, top, scale = _extent(data["points"], data["epi"])
+    mode = choose_view(data) if view == "auto" else view
+    wide = mode == "wide"
+    left, top, scale = _extent(data["wide_points"] if wide else data["focus_points"], data["epi"], wide)
 
     def to_px(x, y):
         return (x - left) * scale, (y - top) * scale
@@ -623,7 +713,13 @@ def render_report_map(report, output=None):
         size = int(max(30, min(48, scale * 16)))
         header, names_block = _draw_header(c, report, data)
         footer = _draw_footer(c, report)
-        blocks = [b for b in (header, names_block, footer) if b is not None]
+        county_block = None
+        if data["strong"]:
+            groups = _county_groups(base, data)
+            box = (24, names_block[3], 272, min(H - 24, names_block[3] + _list_height(groups)))
+            if _sea_share(base, (left, top, scale), box) >= LIST_SEA:
+                county_block = _draw_counties(c, groups, names_block[3])
+        blocks = [b for b in (header, names_block, footer, county_block) if b is not None]
 
         epi_px = None
         if data["epi"] is not None:
