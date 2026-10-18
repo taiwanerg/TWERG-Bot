@@ -5,10 +5,13 @@ import asyncio
 import re
 import logging
 
+from module import outbox
+
 class AutoPublishCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.url_regex = re.compile(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+')
+        self.box = outbox.get(bot)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -45,17 +48,12 @@ class AutoPublishCog(commands.Cog):
                 except Exception:
                     pass
 
-        try:
-            # 檢查是否已經發布過了
-            if not target_msg.flags.crossposted:
-                await target_msg.publish()
+        # 檢查是否已經發布過了
+        if not target_msg.flags.crossposted:
+            key = f"publish:{message.id}"
+            await self.box.publish(key, message.channel.id, message.id)
+            if self.box.state(key) == "sent":
                 logging.info(f"📢 [Auto Publish] 已自動發布訊息至 {message.channel.name}")
-        except discord.Forbidden:
-            logging.error(f"❌ [Auto Publish] 無法發布訊息：缺少管理訊息權限 ({message.channel.name})")
-        except discord.HTTPException as e:
-            logging.error(f"❌ [Auto Publish] 發布訊息時發生錯誤：{e}")
-        except Exception as e:
-            logging.error(f"❌ [Auto Publish] 發生未預期錯誤：{e}")
 
 async def setup(bot):
     await bot.add_cog(AutoPublishCog(bot))

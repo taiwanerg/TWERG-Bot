@@ -23,6 +23,7 @@ class KMAReportAlertCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.state = kma_push.load_state("report")
+        kma_push.register_late_refs(bot, "report", self.state, lambda: kma_push.save_state("report", self.state))
         self.stations = []
         self.station_frames = deque()
         self.lock = asyncio.Lock()
@@ -155,7 +156,7 @@ class KMAReportAlertCog(commands.Cog):
             analysis, png = await kma_push.prepare(event, "지진정보", stations)
             filename = f"kma_report_{int(origin.timestamp())}.png"
             content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
-            record["messages"] = await kma_push.send_to_channels(self.bot, channels, content, embed, png, filename)
+            record["messages"] = await kma_push.send_to_channels(self.bot, channels, content, embed, png, filename, kind="report", record_key=key)
             kma_push.save_state("report", self.state)
             logging.info(f"🚨 [KMA 報告] {key} M{event.get('magnitude')} 已發送至 {len(record['messages'])} 個頻道")
             return
@@ -191,7 +192,7 @@ class KMAReportAlertCog(commands.Cog):
             )
             logging.info(f"🔄 [KMA 報告] {key} 內容更新（{source}），已編輯 {len(record['messages'])} 則訊息")
         if new_channels:
-            refs = await kma_push.send_to_channels(self.bot, new_channels, content, embed, png, filename)
+            refs = await kma_push.send_to_channels(self.bot, new_channels, content, embed, png, filename, kind="report", record_key=key)
             record.setdefault("messages", []).extend(refs)
             logging.info(f"🚨 [KMA 報告] {key} 由 {source} 補發至 {len(refs)} 個頻道")
         kma_push.save_state("report", self.state)

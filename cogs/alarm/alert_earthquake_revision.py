@@ -18,6 +18,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from module import outbox
 
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 DATABASE_PATH = Path("data") / "earthquake_reports.db"
@@ -36,7 +37,6 @@ LOCAL_MATCH_SECONDS = 120
 LOCAL_MATCH_KM = 100
 CHANNEL_SEND_INTERVAL = 1.1
 GLOBAL_SEND_INTERVAL = 0.06
-MAX_RATE_LIMIT_RETRIES = 3
 REVISION_HISTORY_START_DATE = "2026/10/06"
 REVISION_HISTORY_METADATA_KEY = "revision_history_available_since"
 
@@ -846,7 +846,10 @@ class EarthquakeRevisionAlertCog(commands.Cog):
                     guild_sent = False
                     for channel_id, channel in tuple(channels.items()):
                         try:
-                            await self._send_with_rate_limit(channel_id, channel, embed, change["kind"])
+                            await self._send_with_rate_limit(
+                                channel_id, channel, embed, change["kind"],
+                                key=f"revision:{change['event_key']}:{change['notification_hash']}:{channel_id}",
+                            )
                             sent_count += 1
                             guild_sent = True
                         except (discord.Forbidden, discord.HTTPException) as error:
@@ -1007,7 +1010,7 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         parsed = EarthquakeRevisionAlertCog._parse_origin_time(value)
         return parsed.strftime("%Y/%m/%d %H:%M:%S") if parsed else str(value)
 
-    async def _send_with_rate_limit(self, channel_id, channel, embed, kind="revision"):
+    async def _send_with_rate_limit(self, channel_id, channel, embed, kind="revision", key=None):
         now = clock.monotonic()
         wait_time = max(
             self._last_channel_send.get(channel_id, 0.0) + CHANNEL_SEND_INTERVAL - now,
@@ -1017,18 +1020,11 @@ class EarthquakeRevisionAlertCog(commands.Cog):
         if wait_time:
             await asyncio.sleep(wait_time)
         content = "地震報告來源資料差異" if kind == "difference" else "地震報告更新"
-        for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
-            try:
-                await channel.send(content=content, embed=embed)
-                sent_at = clock.monotonic()
-                self._last_channel_send[channel_id] = sent_at
-                self._last_global_send = sent_at
-                return
-            except discord.HTTPException as error:
-                if getattr(error, "status", None) != 429 or attempt == MAX_RATE_LIMIT_RETRIES:
-                    raise
-                retry_after = max(float(getattr(error, "retry_after", 1.0) or 1.0), 1.0)
-                await asyncio.sleep(retry_after)
+        key = key or f"revision:{channel_id}:{int(clock.time() * 1000)}"
+        await outbox.get(self.bot).send(key, channel_id, content=content, embed=embed, raise_on_drop=True)
+        sent_at = clock.monotonic()
+        self._last_channel_send[channel_id] = sent_at
+        self._last_global_send = sent_at
 
     @staticmethod
     def _error_summary(error):
