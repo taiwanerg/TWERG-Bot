@@ -69,6 +69,7 @@ PAD_WIDE = 0.04
 MIN_SPAN = (200.0, 130.0)
 COUNTY_ORDER = ["基隆市", "台北市", "新北市", "桃園市", "新竹市", "新竹縣", "苗栗縣", "台中市", "彰化縣", "南投縣", "雲林縣",
                 "嘉義市", "嘉義縣", "台南市", "高雄市", "屏東縣", "宜蘭縣", "花蓮縣", "台東縣", "澎湖縣", "金門縣", "連江縣"]
+ISLAND = [(120.03, 21.88), (122.02, 25.32)]
 FOCUS_COVER = 0.8
 LIST_SEA = 0.9
 MAX_NAMES = 4
@@ -687,7 +688,7 @@ def render_report_map(report, output=None, view="auto"):
     data = analyze(report)
     mode = choose_view(data) if view == "auto" else view
     wide = mode == "wide"
-    left, top, scale = _extent(data["wide_points"] if wide else data["focus_points"], data["epi"], wide)
+    left, top, scale = _extent([to_proj(*p) for p in ISLAND] if wide else data["focus_points"], data["epi"], wide)
 
     def to_px(x, y):
         return (x - left) * scale, (y - top) * scale
