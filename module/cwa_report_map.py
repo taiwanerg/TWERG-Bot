@@ -512,55 +512,96 @@ def _logo(height, alpha=None):
         _cache[key] = None
         return None
     img = Image.open(TWERG_LOGO_PATH).convert("RGBA")
+    if alpha is not None:
+        img = Image.fromarray(_mono_logo(np.asarray(img).astype(np.float32) / 255.0, alpha), "RGBA")
     ratio = height / img.height
     img = img.resize((max(1, int(img.width * ratio)), int(height)), Image.LANCZOS)
     arr = np.asarray(img).astype(np.float32) / 255.0
-    if alpha is not None:
-        out = np.ones_like(arr)
-        out[..., 3] = arr[..., 3] * alpha
-        arr = out
     _cache[key] = arr
     return arr
 
 
-def _draw_watermark(c, epi_px, blocks, tiles, size, land, view, peak):
+def _mono_logo(arr, alpha):
+    r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    orange = (a > 0.5) & (r > 0.8) & (g > 0.5) & (g < 0.85) & (b < 0.5)
+    rows =np.zeros(orange.shape, dtype=bool)
+    cols = np.zeros(orange.shape, dtype=bool)
+    for i, row in enumerate(orange):
+        idx = np.flatnonzero(row)
+        if idx.size:
+            rows[i, idx[0]:idx[-1] + 1] = True
+    for j, col in enumerate(orange.T):
+        idx = np.flatnonzero(col)
+        if idx.size:
+            cols[idx[0]:idx[-1] + 1, j] = True
+    inside = rows & cols
+    cut = np.where(inside, np.clip((0.6 - lum) / 0.3, 0.0, 1.0), 0.0)
+    out = np.ones_like(arr)
+    out[..., 3] = a * (1.0 - cut) * alpha
+    return (out * 255).round().astype(np.uint8)
+
+
+def _level_grid(base, data, view, step):
+    left, top, scale = view
+    land = base["land"]
+    gw, gh = W // step, H // step
+    grid = np.full((gh, gw), -1, dtype=int)
+    for gy in range(gh):
+        for gx in range(gw):
+            if land.contains(Point(left + (gx + 0.5) * step / scale, top + (gy + 0.5) * step / scale)):
+                grid[gy, gx] = 0
+    for idx, level in data["towns"].items():
+        t = base["towns"][idx]
+        x0, y0, x1, y1 = t["bounds"]
+        gx0 = max(0, int((x0 - left) * scale // step))
+        gx1 = min(gw - 1, int((x1 - left) * scale // step))
+        gy0 = max(0, int((y0 - top) * scale // step))
+        gy1 = min(gh - 1, int((y1 - top) * scale // step))
+        rank = _rank(level)
+        for gy in range(gy0, gy1 + 1):
+            for gx in range(gx0, gx1 + 1):
+                if grid[gy, gx] >= 0 and t["prepared"].contains(Point(left + (gx + 0.5) * step / scale, top + (gy + 0.5) * step / scale)):
+                    grid[gy, gx] = max(grid[gy, gx], rank)
+    return grid
+
+
+def _draw_watermark(c, epi_px, blocks, tiles, size, base, data, view):
     rng = random.SystemRandom()
     wm = _logo(220, alpha=0.24)
     if wm is None:
         return
     h, w = wm.shape[0], wm.shape[1]
-    block_h = h + 46
-    left, top, scale = view
-    key_rank = max(_rank(peak or "0") - 1, 3)
-    step = 20
-    mask = np.array([
-        [land.contains(Point(left + (gx + step / 2) / scale, top + (gy + step / 2) / scale)) for gx in range(0, W, step)]
-        for gy in range(0, H, step)
-    ], dtype=float)
-    best, best_score = [], None
-    for cx in range(int(w / 2 + 30), int(W - w / 2 - 30), 20):
-        for cy in range(int(block_h / 2 + 30), int(H - block_h / 2 - 30), 20):
-            l, t, r, b = cx - w / 2 - 12, cy - block_h / 2 - 12, cx + w / 2 + 12, cy + block_h / 2 + 12
+    label = c.text(0, 0, "@taiwanerg", 26, color=WHITE, weight="bold", ha="center", alpha=0.3, z=30)
+    bw = max(w, c.width(label))
+    bh = h + 46
+    margin, pad, step = 30, 12, 20
+    grid = _level_grid(base, data, view, step)
+    best, best_key = [], None
+    for cx in range(int(bw / 2 + margin + pad), int(W - bw / 2 - margin - pad) + 1, 20):
+        for cy in range(int(bh / 2 + margin + pad), int(H - bh / 2 - margin - pad) + 1, 20):
+            l, t, r, b = cx - bw / 2 - pad, cy - bh / 2 - pad, cx + bw / 2 + pad, cy + bh / 2 + pad
             if epi_px is not None and math.hypot(cx - epi_px[0], cy - epi_px[1]) < 200:
                 continue
             if any(l < br and r > bl and t < bb and b > bt for bl, bt, br, bb in blocks):
                 continue
-            inside = [lv for px, py, lv in tiles if l - size / 2 < px < r + size / 2 and t - size / 2 < py < b + size / 2]
-            if any(_rank(lv) >= key_rank for lv in inside):
-                continue
-            cells = mask[int((cy - h / 2) // step):int((cy + h / 2) // step) + 1, int((cx - w / 2) // step):int((cx + w / 2) // step) + 1]
-            land_share = float(cells.mean()) if cells.size else 0.0
-            score = round(land_share * 10)
-            if best_score is None or score > best_score:
-                best, best_score = [(cx, cy)], score
-            elif score == best_score:
+            cells = grid[int((cy - bh / 2) // step):int((cy + bh / 2) // step) + 1, int((cx - bw / 2) // step):int((cx + bw / 2) // step) + 1]
+            on_land = cells[cells >= 0]
+            land_share = on_land.size / cells.size if cells.size else 0.0
+            covered = [_rank(lv) for px, py, lv in tiles if l - size / 2 < px < r + size / 2 and t - size / 2 < py < b + size / 2]
+            peak = max([int(on_land.max()) if on_land.size else 0] + covered)
+            key = (land_share >= 0.5, -peak, -len(covered), round(land_share * 10))
+            if best_key is None or key > best_key:
+                best, best_key = [(cx, cy)], key
+            elif key == best_key:
                 best.append((cx, cy))
     if not best:
+        label.remove()
         return
     cx, cy = rng.choice(best)
-    top = cy - block_h / 2
-    c.ui.imshow(wm, extent=(cx - w / 2, cx + w / 2, top + h, top), zorder=22, interpolation="lanczos")
-    c.text(cx, top + h + 34, "@taiwanerg", 26, color=WHITE, weight="bold", ha="center", alpha=0.3, z=22)
+    top = cy - bh / 2
+    c.ui.imshow(wm, extent=(cx - w / 2, cx + w / 2, top + h, top), zorder=30, interpolation="lanczos")
+    label.set_position((cx, top + h + 34))
 
 
 def render_report_map(report, output=None):
@@ -610,7 +651,7 @@ def render_report_map(report, output=None):
         for px, py, level in sorted(tiles, key=lambda t: _rank(t[2])):
             _tile(c, px, py, size, level)
 
-        _draw_watermark(c, epi_px, blocks, tiles, size, base["land"], (left, top, scale), data["peak"])
+        _draw_watermark(c, epi_px, blocks, tiles, size, base, data, (left, top, scale))
 
         buf = output if output is not None else io.BytesIO()
         fig.savefig(buf, dpi=DPI, facecolor=SEA, format="png")
