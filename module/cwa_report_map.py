@@ -66,6 +66,9 @@ SAFE = (300, 150, W - 60, H - 80)
 MIN_SPAN = (200.0, 130.0)
 MAX_NAMES = 4
 FOCUS_MIN = 6
+WIDE_FROM = "5-"
+WIDE_FLOOR = "4"
+EPI_CLEAR = 1.2
 
 _lock = threading.Lock()
 _cache = {}
@@ -232,9 +235,10 @@ def analyze(report):
             x, y = to_proj(float(s_lon), float(s_lat))
             idx = _locate(base, x, y)
             if idx is None:
-                county = area.get("CountyName", "").replace("臺", "台")
-                if county not in outer or _rank(level) > _rank(outer[county][0]):
-                    outer[county] = (level, x, y)
+                label = str(st.get("StationName") or "").strip() or area.get("CountyName", "")
+                label = label.replace("臺", "台")
+                if label not in outer or _rank(level) > _rank(outer[label][0]):
+                    outer[label] = (level, x, y)
                 continue
             if _rank(level) > _rank(towns.get(idx, "0")):
                 towns[idx] = level
@@ -252,12 +256,16 @@ def analyze(report):
         names += [c for c, o in outer.items() if o[0] == peak]
     points = []
     if towns:
-        floor = max(1, max(_rank(lv) for lv in towns.values()) - 1)
-        while True:
-            focus = [i for i, lv in towns.items() if _rank(lv) >= floor]
-            if len(focus) >= FOCUS_MIN or floor <= 1:
-                break
-            floor -= 1
+        top = max(_rank(lv) for lv in towns.values())
+        if top >= _rank(WIDE_FROM):
+            focus = [i for i, lv in towns.items() if _rank(lv) >= _rank(WIDE_FLOOR)]
+        else:
+            floor = max(1, top - 1)
+            while True:
+                focus = [i for i, lv in towns.items() if _rank(lv) >= floor]
+                if len(focus) >= FOCUS_MIN or floor <= 1:
+                    break
+                floor -= 1
         for i in focus:
             rp = base["towns"][i]["geom"].representative_point()
             points.append((rp.x, rp.y))
@@ -361,12 +369,12 @@ def _place_tiles(base, data, to_px, size, epi_px, blocks):
         px, py = to_px(x, y)
         if epi_px is not None:
             dx, dy = px - epi_px[0], py - epi_px[1]
-            dist = math.hypot(dx, dy)
-            if dist < size * 0.95:
-                if dist < 1:
-                    dx, dy, dist = 0.0, -1.0, 1.0
-                px = epi_px[0] + dx / dist * size * 1.05
-                py = epi_px[1] + dy / dist * size * 1.05
+            reach = max(abs(dx), abs(dy))
+            if reach < size * EPI_CLEAR:
+                if reach < 1:
+                    dx, dy, reach = 0.0, -1.0, 1.0
+                px = epi_px[0] + dx / reach * size * EPI_CLEAR
+                py = epi_px[1] + dy / reach * size * EPI_CLEAR
         if not (size / 2 < px < W - size / 2 and size / 2 < py < H - size / 2):
             continue
         l, t, r, b = px - size / 2, py - size / 2, px + size / 2, py + size / 2
