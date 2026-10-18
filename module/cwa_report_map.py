@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import font_manager, patheffects
+from matplotlib import font_manager
 from matplotlib.patches import PathPatch, Polygon as MplPolygon, Rectangle
 from matplotlib.path import Path
 from PIL import Image
@@ -471,25 +471,6 @@ def _draw_header(c, report, data):
     return (bar_x, bar_y, bar_r, header_bottom), (box_x, box_y, box_x + box_w, y)
 
 
-def _draw_outer(c, outer, to_px, size):
-    hidden = {}
-    for county, (level, x, y) in outer.items():
-        px, py = to_px(x, y)
-        if not (size < px < W - size and size < py < H - size):
-            hidden[county] = level
-    if not hidden:
-        return None
-    items = sorted(hidden.items(), key=lambda kv: -_rank(kv[1]))
-    x = 24
-    y = H - 24 - size
-    for county, level in items:
-        _tile(c, x + size / 2, y + size / 2, size, level, z=34)
-        label = c.text(x + size + 10, y + size / 2 + 8, county, 20, color=WHITE, weight="bold", z=35,
-                       effects=[patheffects.withStroke(linewidth=4 * PX, foreground=NAVY)])
-        x += size + c.width(label) + 28
-    return (24, y, x, H - 24)
-
-
 def _draw_footer(c, report):
     no = report.get("EarthquakeNo")
     text = f"資料  中央氣象署  第 {no} 號地震報告" if no else "資料  中央氣象署"
@@ -641,9 +622,8 @@ def render_report_map(report, output=None):
 
         size = int(max(30, min(48, scale * 16)))
         header, names_block = _draw_header(c, report, data)
-        outer_block = _draw_outer(c, data["outer"], to_px, size)
         footer = _draw_footer(c, report)
-        blocks = [b for b in (header, names_block, footer, outer_block) if b is not None]
+        blocks = [b for b in (header, names_block, footer) if b is not None]
 
         epi_px = None
         if data["epi"] is not None:
