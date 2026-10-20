@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import font_manager, patheffects
+from matplotlib import font_manager
 from matplotlib.patches import PathPatch, Polygon as MplPolygon, Rectangle
 from matplotlib.path import Path
 from PIL import Image
@@ -63,9 +63,20 @@ LEVEL_TEXT = {k: (WHITE if k in ("3", "6-", "6+", "7") else INK) for k in LEVELS
 LEVEL_ZH = {"0": "0級", "1": "1級", "2": "2級", "3": "3級", "4": "4級", "5-": "5弱", "5+": "5強", "6-": "6弱", "6+": "6強", "7": "7級"}
 
 SAFE = (300, 150, W - 60, H - 80)
+SAFE_WIDE = (300, 30, W - 40, H - 74)
+PAD = 0.12
+PAD_WIDE = 0.04
 MIN_SPAN = (200.0, 130.0)
+COUNTY_ORDER = ["基隆市", "台北市", "新北市", "桃園市", "新竹市", "新竹縣", "苗栗縣", "台中市", "彰化縣", "南投縣", "雲林縣",
+                "嘉義市", "嘉義縣", "台南市", "高雄市", "屏東縣", "宜蘭縣", "花蓮縣", "台東縣", "澎湖縣", "金門縣", "連江縣"]
+ISLAND = [(120.03, 21.88), (122.02, 25.32)]
+FOCUS_COVER = 0.8
+LIST_SEA = 0.9
 MAX_NAMES = 4
 FOCUS_MIN = 6
+WIDE_FROM = "5-"
+WIDE_FLOOR = "4"
+EPI_CLEAR = 1.2
 
 _lock = threading.Lock()
 _cache = {}
@@ -232,9 +243,10 @@ def analyze(report):
             x, y = to_proj(float(s_lon), float(s_lat))
             idx = _locate(base, x, y)
             if idx is None:
-                county = area.get("CountyName", "").replace("臺", "台")
-                if county not in outer or _rank(level) > _rank(outer[county][0]):
-                    outer[county] = (level, x, y)
+                label = str(st.get("StationName") or "").strip() or area.get("CountyName", "")
+                label = label.replace("臺", "台")
+                if label not in outer or _rank(level) > _rank(outer[label][0]):
+                    outer[label] = (level, x, y)
                 continue
             if _rank(level) > _rank(towns.get(idx, "0")):
                 towns[idx] = level
@@ -250,7 +262,7 @@ def analyze(report):
             tops.sort(key=lambda i: base["towns"][i]["geom"].centroid.distance(Point(*epi_xy)))
         names = [base["towns"][i]["county"] + base["towns"][i]["town"] for i in tops]
         names += [c for c, o in outer.items() if o[0] == peak]
-    points = []
+    focus, strong = [], []
     if towns:
         floor = max(1, max(_rank(lv) for lv in towns.values()) - 1)
         while True:
@@ -258,13 +270,48 @@ def analyze(report):
             if len(focus) >= FOCUS_MIN or floor <= 1:
                 break
             floor -= 1
-        for i in focus:
+        strong = [i for i, lv in towns.items() if _rank(lv) >= _rank(WIDE_FLOOR)] or list(towns)
+
+    def rep(ids):
+        out = []
+        for i in ids:
             rp = base["towns"][i]["geom"].representative_point()
-            points.append((rp.x, rp.y))
-    return {"towns": towns, "outer": outer, "points": points, "epi": epi_xy, "peak": peak, "names": names}
+            out.append((rp.x, rp.y))
+        return out
+
+    return {
+        "towns": towns, "outer": outer, "epi": epi_xy, "peak": peak, "names": names,
+        "focus_points": rep(focus), "wide_points": rep(strong),
+        "strong": peak is not None and _rank(peak) >= _rank(WIDE_FROM),
+    }
 
 
-def _extent(points, epi):
+def choose_view(data):
+    if not data["strong"]:
+        return "focus"
+    left, top, scale = _extent(data["focus_points"], data["epi"])
+    sl, st, sr, sb = SAFE
+    x0, x1 = left + sl / scale, left + sr / scale
+    y0, y1 = top + st / scale, top + sb / scale
+    pts = data["wide_points"]
+    inside = sum(1 for x, y in pts if x0 <= x <= x1 and y0 <= y <= y1)
+    return "focus" if pts and inside / len(pts) >= FOCUS_COVER else "wide"
+
+
+def _county_groups(base, data):
+    best = {}
+    for idx, level in data["towns"].items():
+        county = base["towns"][idx]["county"].replace("臺", "台")
+        if county not in best or _rank(level) > _rank(best[county]):
+            best[county] = level
+    order = {name: i for i, name in enumerate(COUNTY_ORDER)}
+    groups = {}
+    for county in sorted(best, key=lambda n: order.get(n, len(order))):
+        groups.setdefault(best[county], []).append(county)
+    return sorted(groups.items(), key=lambda kv: -_rank(kv[0]))
+
+
+def _extent(points, epi, wide=False):
     pts = list(points)
     if epi is not None:
         pts.append(epi)
@@ -273,8 +320,9 @@ def _extent(points, epi):
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
-    pad_x = max((x1 - x0) * 0.12, 14)
-    pad_y = max((y1 - y0) * 0.12, 14)
+    pad = PAD_WIDE if wide else PAD
+    pad_x = max((x1 - x0) * pad, 14)
+    pad_y = max((y1 - y0) * pad, 14)
     x0, x1, y0, y1 = x0 - pad_x, x1 + pad_x, y0 - pad_y, y1 + pad_y
     if x1 - x0 < MIN_SPAN[0]:
         c = (x0 + x1) / 2
@@ -282,7 +330,7 @@ def _extent(points, epi):
     if y1 - y0 < MIN_SPAN[1]:
         c = (y0 + y1) / 2
         y0, y1 = c - MIN_SPAN[1] / 2, c + MIN_SPAN[1] / 2
-    sl, st, sr, sb = SAFE
+    sl, st, sr, sb = SAFE_WIDE if wide else SAFE
     scale = min((sr - sl) / (x1 - x0), (sb - st) / (y1 - y0))
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     left = cx - ((sl + sr) / 2) / scale
@@ -361,12 +409,12 @@ def _place_tiles(base, data, to_px, size, epi_px, blocks):
         px, py = to_px(x, y)
         if epi_px is not None:
             dx, dy = px - epi_px[0], py - epi_px[1]
-            dist = math.hypot(dx, dy)
-            if dist < size * 0.95:
-                if dist < 1:
-                    dx, dy, dist = 0.0, -1.0, 1.0
-                px = epi_px[0] + dx / dist * size * 1.05
-                py = epi_px[1] + dy / dist * size * 1.05
+            reach = max(abs(dx), abs(dy))
+            if reach < size * EPI_CLEAR:
+                if reach < 1:
+                    dx, dy, reach = 0.0, -1.0, 1.0
+                px = epi_px[0] + dx / reach * size * EPI_CLEAR
+                py = epi_px[1] + dy / reach * size * EPI_CLEAR
         if not (size / 2 < px < W - size / 2 and size / 2 < py < H - size / 2):
             continue
         l, t, r, b = px - size / 2, py - size / 2, px + size / 2, py + size / 2
@@ -463,23 +511,37 @@ def _draw_header(c, report, data):
     return (bar_x, bar_y, bar_r, header_bottom), (box_x, box_y, box_x + box_w, y)
 
 
-def _draw_outer(c, outer, to_px, size):
-    hidden = {}
-    for county, (level, x, y) in outer.items():
-        px, py = to_px(x, y)
-        if not (size < px < W - size and size < py < H - size):
-            hidden[county] = level
-    if not hidden:
-        return None
-    items = sorted(hidden.items(), key=lambda kv: -_rank(kv[1]))
-    x = 24
-    y = H - 24 - size
-    for county, level in items:
-        _tile(c, x + size / 2, y + size / 2, size, level, z=34)
-        label = c.text(x + size + 10, y + size / 2 + 8, county, 20, color=WHITE, weight="bold", z=35,
-                       effects=[patheffects.withStroke(linewidth=4 * PX, foreground=NAVY)])
-        x += size + c.width(label) + 28
-    return (24, y, x, H - 24)
+def _draw_counties(c, groups, top):
+    x0, w = 24, 248
+    tile, line_h, name_size = 34, 30, 21
+    limit = H - 24
+    y = top + 12
+    c.rect(x0, y, w, 34, LAVENDER, edge=NAVY, lw=1.2, z=40)
+    c.text(x0 + 14, y + 24, "各縣市最大震度", 19, color=NAVY, weight="bold", z=41)
+    y += 34
+    avail = w - tile - 30
+    for i, (level, counties) in enumerate(groups):
+        lines, cur, cur_w = [], [], 0.0
+        for name in counties:
+            t = c.text(0, 0, name, name_size, color=WHITE, weight="bold", z=41)
+            nw = c.width(t)
+            t.remove()
+            if cur and cur_w + 10 + nw > avail:
+                lines.append(cur)
+                cur, cur_w = [], 0.0
+            cur_w += (10 if cur else 0) + nw
+            cur.append(name)
+        if cur:
+            lines.append(cur)
+        gh = max(tile + 12, len(lines) * line_h + 14)
+        if y + gh > limit:
+            break
+        c.rect(x0, y, w, gh, NAVY if i % 2 == 0 else NAVY_2, edge="#0A1236", lw=1.0, z=40)
+        _tile(c, x0 + 10 + tile / 2, y + 6 + tile / 2, tile, level, z=41)
+        for j, row in enumerate(lines):
+            c.text(x0 + tile + 22, y + 7 + line_h * j + 22, "  ".join(row), name_size, color=WHITE, weight="bold", z=41)
+        y += gh
+    return (x0, top, x0 + w, y)
 
 
 def _draw_footer(c, report):
@@ -512,62 +574,121 @@ def _logo(height, alpha=None):
         _cache[key] = None
         return None
     img = Image.open(TWERG_LOGO_PATH).convert("RGBA")
+    if alpha is not None:
+        img = Image.fromarray(_mono_logo(np.asarray(img).astype(np.float32) / 255.0, alpha), "RGBA")
     ratio = height / img.height
     img = img.resize((max(1, int(img.width * ratio)), int(height)), Image.LANCZOS)
     arr = np.asarray(img).astype(np.float32) / 255.0
-    if alpha is not None:
-        out = np.ones_like(arr)
-        out[..., 3] = arr[..., 3] * alpha
-        arr = out
     _cache[key] = arr
     return arr
 
 
-def _draw_watermark(c, epi_px, blocks, tiles, size, land, view, peak):
+def _mono_logo(arr, alpha):
+    r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    orange = (a > 0.5) & (r > 0.8) & (g > 0.5) & (g < 0.85) & (b < 0.5)
+    rows =np.zeros(orange.shape, dtype=bool)
+    cols = np.zeros(orange.shape, dtype=bool)
+    for i, row in enumerate(orange):
+        idx = np.flatnonzero(row)
+        if idx.size:
+            rows[i, idx[0]:idx[-1] + 1] = True
+    for j, col in enumerate(orange.T):
+        idx = np.flatnonzero(col)
+        if idx.size:
+            cols[idx[0]:idx[-1] + 1, j] = True
+    inside = rows & cols
+    cut = np.where(inside, np.clip((0.6 - lum) / 0.3, 0.0, 1.0), 0.0)
+    out = np.ones_like(arr)
+    out[..., 3] = a * (1.0 - cut) * alpha
+    return (out * 255).round().astype(np.uint8)
+
+
+def _level_grid(base, data, view, step):
+    left, top, scale = view
+    land = base["land"]
+    gw, gh = W // step, H // step
+    grid = np.full((gh, gw), -1, dtype=int)
+    for gy in range(gh):
+        for gx in range(gw):
+            if land.contains(Point(left + (gx + 0.5) * step / scale, top + (gy + 0.5) * step / scale)):
+                grid[gy, gx] = 0
+    for idx, level in data["towns"].items():
+        t = base["towns"][idx]
+        x0, y0, x1, y1 = t["bounds"]
+        gx0 = max(0, int((x0 - left) * scale // step))
+        gx1 = min(gw - 1, int((x1 - left) * scale // step))
+        gy0 = max(0, int((y0 - top) * scale // step))
+        gy1 = min(gh - 1, int((y1 - top) * scale // step))
+        rank = _rank(level)
+        for gy in range(gy0, gy1 + 1):
+            for gx in range(gx0, gx1 + 1):
+                if grid[gy, gx] >= 0 and t["prepared"].contains(Point(left + (gx + 0.5) * step / scale, top + (gy + 0.5) * step / scale)):
+                    grid[gy, gx] = max(grid[gy, gx], rank)
+    return grid
+
+
+def _draw_watermark(c, epi_px, blocks, tiles, size, base, data, view):
     rng = random.SystemRandom()
     wm = _logo(220, alpha=0.24)
     if wm is None:
         return
     h, w = wm.shape[0], wm.shape[1]
-    block_h = h + 46
-    left, top, scale = view
-    key_rank = max(_rank(peak or "0") - 1, 3)
-    step = 20
-    mask = np.array([
-        [land.contains(Point(left + (gx + step / 2) / scale, top + (gy + step / 2) / scale)) for gx in range(0, W, step)]
-        for gy in range(0, H, step)
-    ], dtype=float)
-    best, best_score = [], None
-    for cx in range(int(w / 2 + 30), int(W - w / 2 - 30), 20):
-        for cy in range(int(block_h / 2 + 30), int(H - block_h / 2 - 30), 20):
-            l, t, r, b = cx - w / 2 - 12, cy - block_h / 2 - 12, cx + w / 2 + 12, cy + block_h / 2 + 12
+    label = c.text(0, 0, "@taiwanerg", 26, color=WHITE, weight="bold", ha="center", alpha=0.3, z=30)
+    bw = max(w, c.width(label))
+    bh = h + 46
+    margin, pad, step = 30, 12, 20
+    grid = _level_grid(base, data, view, step)
+    best, best_key = [], None
+    for cx in range(int(bw / 2 + margin + pad), int(W - bw / 2 - margin - pad) + 1, 20):
+        for cy in range(int(bh / 2 + margin + pad), int(H - bh / 2 - margin - pad) + 1, 20):
+            l, t, r, b = cx - bw / 2 - pad, cy - bh / 2 - pad, cx + bw / 2 + pad, cy + bh / 2 + pad
             if epi_px is not None and math.hypot(cx - epi_px[0], cy - epi_px[1]) < 200:
                 continue
             if any(l < br and r > bl and t < bb and b > bt for bl, bt, br, bb in blocks):
                 continue
-            inside = [lv for px, py, lv in tiles if l - size / 2 < px < r + size / 2 and t - size / 2 < py < b + size / 2]
-            if any(_rank(lv) >= key_rank for lv in inside):
-                continue
-            cells = mask[int((cy - h / 2) // step):int((cy + h / 2) // step) + 1, int((cx - w / 2) // step):int((cx + w / 2) // step) + 1]
-            land_share = float(cells.mean()) if cells.size else 0.0
-            score = round(land_share * 10)
-            if best_score is None or score > best_score:
-                best, best_score = [(cx, cy)], score
-            elif score == best_score:
+            cells = grid[int((cy - bh / 2) // step):int((cy + bh / 2) // step) + 1, int((cx - bw / 2) // step):int((cx + bw / 2) // step) + 1]
+            on_land = cells[cells >= 0]
+            land_share = on_land.size / cells.size if cells.size else 0.0
+            covered = [_rank(lv) for px, py, lv in tiles if l - size / 2 < px < r + size / 2 and t - size / 2 < py < b + size / 2]
+            peak = max([int(on_land.max()) if on_land.size else 0] + covered)
+            key = (land_share >= 0.5, -peak, -len(covered), round(land_share * 10))
+            if best_key is None or key > best_key:
+                best, best_key = [(cx, cy)], key
+            elif key == best_key:
                 best.append((cx, cy))
     if not best:
+        label.remove()
         return
     cx, cy = rng.choice(best)
-    top = cy - block_h / 2
-    c.ui.imshow(wm, extent=(cx - w / 2, cx + w / 2, top + h, top), zorder=22, interpolation="lanczos")
-    c.text(cx, top + h + 34, "@taiwanerg", 26, color=WHITE, weight="bold", ha="center", alpha=0.3, z=22)
+    top = cy - bh / 2
+    c.ui.imshow(wm, extent=(cx - w / 2, cx + w / 2, top + h, top), zorder=30, interpolation="lanczos")
+    label.set_position((cx, top + h + 34))
 
 
-def render_report_map(report, output=None):
+def _sea_share(base, view, box, step=16):
+    left, top, scale = view
+    x0, y0, x1, y1 = box
+    hits = total = 0
+    for py in range(int(y0), int(y1), step):
+        for px in range(int(x0), int(x1), step):
+            total += 1
+            if not base["land"].contains(Point(left + px / scale, top + py / scale)):
+                hits += 1
+    return hits / total if total else 0.0
+
+
+def _list_height(groups):
+    return 46 + sum(max(46, ((len(counties) + 1) // 2) * 30 + 14) for _, counties in groups)
+
+
+def render_report_map(report, output=None, view="auto"):
     _register_fonts()
     base = _basemap()
     data = analyze(report)
-    left, top, scale = _extent(data["points"], data["epi"])
+    mode = choose_view(data) if view == "auto" else view
+    wide = mode == "wide"
+    left, top, scale = _extent([to_proj(*p) for p in ISLAND] if wide else data["focus_points"], data["epi"], wide)
 
     def to_px(x, y):
         return (x - left) * scale, (y - top) * scale
@@ -592,9 +713,14 @@ def render_report_map(report, output=None):
 
         size = int(max(30, min(48, scale * 16)))
         header, names_block = _draw_header(c, report, data)
-        outer_block = _draw_outer(c, data["outer"], to_px, size)
         footer = _draw_footer(c, report)
-        blocks = [b for b in (header, names_block, footer, outer_block) if b is not None]
+        county_block = None
+        if data["strong"]:
+            groups = _county_groups(base, data)
+            box = (24, names_block[3], 272, min(H - 24, names_block[3] + _list_height(groups)))
+            if _sea_share(base, (left, top, scale), box) >= LIST_SEA:
+                county_block = _draw_counties(c, groups, names_block[3])
+        blocks = [b for b in (header, names_block, footer, county_block) if b is not None]
 
         epi_px = None
         if data["epi"] is not None:
@@ -610,7 +736,7 @@ def render_report_map(report, output=None):
         for px, py, level in sorted(tiles, key=lambda t: _rank(t[2])):
             _tile(c, px, py, size, level)
 
-        _draw_watermark(c, epi_px, blocks, tiles, size, base["land"], (left, top, scale), data["peak"])
+        _draw_watermark(c, epi_px, blocks, tiles, size, base, data, (left, top, scale))
 
         buf = output if output is not None else io.BytesIO()
         fig.savefig(buf, dpi=DPI, facecolor=SEA, format="png")
