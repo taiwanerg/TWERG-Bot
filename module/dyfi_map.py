@@ -38,6 +38,7 @@ NOT_FELT_STROKE = '#8a929b'
 
 WM_HEIGHT = 96
 WM_EPI_CLEAR = 100
+BRAND_LOGO_H = 40
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _FONT_DIR   = os.path.join(_SCRIPT_DIR, '..', 'fonts')
@@ -162,6 +163,27 @@ def place_watermark(fig, ax, nation, dots, blocks, epi_px):
     wax.text(cx, top + h + label_h / 2, '@taiwanerg', color='white', alpha=0.3,
              fontsize=13*PT, fontweight='bold', ha='center', va='center')
     wax.set_xlim(0, MAP_W); wax.set_ylim(MAP_H, 0)
+
+def draw_brand(fig):
+    logo = _logo(BRAND_LOGO_H - 8)
+    x0, bottom = 14, 38
+    tx = x0
+    if logo is not None:
+        lh, lw = logo.shape[0], logo.shape[1]
+        bw = max(BRAND_LOGO_H, lw + 8)
+        bax = fig.add_axes([x0/MAP_W, bottom/MAP_H, bw/MAP_W, BRAND_LOGO_H/MAP_H])
+        bax.set_xlim(0, bw); bax.set_ylim(BRAND_LOGO_H, 0); bax.axis('off')
+        bax.add_patch(FancyBboxPatch((0.5, 0.5), bw-1, BRAND_LOGO_H-1, boxstyle='round,pad=0,rounding_size=6',
+                                     facecolor='white', edgecolor='none'))
+        lx, ly = (bw - lw) / 2, (BRAND_LOGO_H - lh) / 2
+        bax.imshow(logo, extent=(lx, lx + lw, ly + lh, ly), interpolation='lanczos', zorder=2)
+        bax.set_xlim(0, bw); bax.set_ylim(BRAND_LOGO_H, 0)
+        tx = x0 + bw + 10
+    tax = fig.add_axes([tx/MAP_W, bottom/MAP_H, 120/MAP_W, BRAND_LOGO_H/MAP_H])
+    tax.set_xlim(0, 120); tax.set_ylim(0, BRAND_LOGO_H); tax.axis('off')
+    tax.text(0, BRAND_LOGO_H*0.70, '地牛記錄小組', color='#d0d0d0', fontsize=15*PT, fontweight='bold', va='center')
+    tax.text(0, BRAND_LOGO_H*0.22, '@taiwanerg',   color='#8c8c8c', fontsize=12*PT, fontweight='bold', va='center')
+    return (x0 - 4, MAP_H - bottom - BRAND_LOGO_H - 4, tx + 120, MAP_H - bottom + 4)
 
 def render_map(eq_no, epicenter=None, eq_type='unknown', output_path=None, discord_reports=None, town_cdi=None):
     topo    = load_topo()
@@ -334,8 +356,13 @@ def render_map(eq_no, epicenter=None, eq_type='unknown', output_path=None, disco
             lax.add_patch(Circle((12, iy), 6, facecolor='none', edgecolor='#888888', linewidth=1*PT, linestyle=(0, (3, 2))))
         lax.text(23, iy, text, color=(1, 1, 1, 0.6), fontsize=8.5*PT, va='center')
 
+    # ── Brand ───────────────────────────────────────────────
+    brand = draw_brand(fig)
+
     # ── Watermark ───────────────────────────────────────────
     blocks = [(0, 0, MAP_W, 48), (0, MAP_H-30, MAP_W, MAP_H), (lx, MAP_H-ly-lH, lx+lW, MAP_H-ly)]
+    if brand is not None:
+        blocks.append(brand)
     try:
         place_watermark(fig, ax, nation, dots, blocks, epi_px)
     except Exception as e:
