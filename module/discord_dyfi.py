@@ -4,6 +4,7 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 import discord
+from module.map_base import TOPO_PATH, town_names
 
 # 這是抓取 Discord 頻道中使用者回報的模組
 
@@ -23,17 +24,11 @@ GRADE_EMOJIS = {
 
 def get_towns_mapping():
     """讀取地圖資料檔建立台灣所有縣市與鄉鎮的對照名稱陣列"""
-    topo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'maps/towns-mercator-10t.json')
     aliases_raw = []
     try:
-        if os.path.exists(topo_path):
-            with open(topo_path, 'r', encoding='utf-8') as f:
-                topo = json.load(f)
-            
+        if os.path.exists(TOPO_PATH):
             counties = set()
-            for g in topo['objects']['towns']['geometries']:
-                props = g.get('properties', {})
-                c, t = props.get('COUNTYNAME', ''), props.get('TOWNNAME', '')
+            for c, t in town_names():
                 if c and t:
                     # 統一將 topo 的台轉為臺，以符合氣象署與 TWERG API 標準
                     c = c.replace('台', '臺')

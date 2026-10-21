@@ -69,7 +69,7 @@ cd TWERG-Bot
 
 **安裝所需套件 (Install dependencies)**
 ```bash
-pip install discord.py geopandas matplotlib shapely pillow
+pip install discord.py matplotlib shapely pillow
 ```
 
 ### 設定檔 (Configuration)

@@ -1,189 +1,78 @@
-# TWERG 體感震度地圖渲染器 接入說明
+# 地圖模組 接入說明
 
-> 適用於 TWERG-Bot，`dyfi_map.py` 渲染器的安裝與使用教學。
+> 適用於 TWERG-Bot 的體感回報地圖、地震報告地圖與共用地圖模組。
 
 ---
 
-## 一、專案資料夾結構
-
-請確認你的 TWERG-Bot 資料夾長這樣：
+## 一、檔案分工
 
 ```
 TWERG-Bot/
-├── bot.py
-├── config.json
-├── cogs/
-│   ├── dyfi_map.py       ← 地圖渲染器（放這裡）
-│   └── （其他 cog 檔案）
-└── fonts/
-    ├── HarmonyOS_SansTC_Regular.ttf
-    ├── HarmonyOS_SansTC_Bold.ttf
-    ├── HarmonyOS_SansTC_Medium.ttf
-    ├── HarmonyOS_SansTC_Light.ttf
-    ├── HarmonyOS_SansTC_Semibold.ttf
-    ├── HarmonyOS_SansTC_Thin.ttf
-    └── HarmonyOS_SansTC_Black.ttf
+├── module/
+│   ├── map_base.py        ← 共用：讀鄉鎮地圖、座標換算、字型、logo、浮水印選位
+│   ├── dyfi_map.py        ← 體感回報地圖（render_map）
+│   ├── dyfi_text.py       ← 體感回報的分級、合併 Discord 回報、Embed 列表文字（不需要繪圖套件）
+│   └── cwa_report_map.py  ← 地震報告震度地圖（render_report_map）
+├── maps/
+│   └── towns-mercator-10t.json   ← 鄉鎮地圖（缺檔時會從 jsDelivr 下載）
+├── photos/
+│   └── twerg_logo_clear.png      ← logo 與浮水印來源
+└── fonts/                        ← HarmonyOS Sans TC、Pretendard
 ```
 
-`fonts/` 資料夾和 `cogs/` 資料夾要放在**同一層**（都在 TWERG-Bot 根目錄下）。
+- 地圖檔、logo、字型都只在第一次用到時讀取，之後重複使用，不用每張圖重讀。
+- 要改分級門檻或顏色：改 `dyfi_text.py` 的 `CDI_MAP`，並和網站 `js/dyfi-map-renderer.js` 保持一致。地震模擬器（`cogs/eq_emulator.py`）用自己的一份舊分級表，不受影響。
 
 ---
 
-## 二、安裝必要套件
-
-在 TWERG-Bot 根目錄，打開終端機（命令提示字元）執行：
+## 二、安裝套件
 
 ```
-pip install matplotlib geopandas shapely pillow
+pip install discord.py matplotlib shapely pillow
 ```
 
-### Windows 注意事項
-
-`geopandas` 在 Windows 有時裝不起來。如果出錯，改用以下兩個方案擇一：
-
-**方案 A — Anaconda（推薦）**
-1. 下載安裝 [Anaconda](https://www.anaconda.com/download)
-2. 打開 Anaconda Prompt，切換到專案目錄
-3. 執行：`conda install geopandas`，再執行 `pip install discord.py`
-
-**方案 B — 手動裝 GDAL**
-1. 先去 [OSGeo4W](https://trac.osgeo.org/osgeo4w/) 下載安裝
-2. 安裝完再回來執行 `pip install geopandas`
-
-### macOS 注意事項
-
-先安裝 Homebrew，再執行：
-```
-brew install gdal
-pip install matplotlib geopandas shapely pillow
-```
-
-### Linux（Ubuntu / Debian）
-
-```
-pip install matplotlib geopandas shapely pillow
-```
+不再需要 `geopandas`。
 
 ---
 
-## 三、安裝確認
-
-安裝完後，用 Python 執行以下確認有無錯誤：
+## 三、體感回報地圖
 
 ```python
-import matplotlib
-import geopandas
-import shapely
-from PIL import Image
-print("全部 OK")
-```
+import time
+from module.dyfi_map import render_map
+from module.dyfi_text import merge_town_cdi
 
----
-
-## 四、在 Discord Bot 裡使用
-
-### 基本呼叫方式
-
-在你的檔案最上方加入：
-
-```python
-from cogs.dyfi_map import render_map
-```
-
-然後在指令裡這樣用：
-
-```python
-@app_commands.command(name='dyfi', description='顯示體感震度地圖')
-async def dyfi(self, interaction: discord.Interaction, eq_no: str):
-    await interaction.response.defer()
-
-    img_path = render_map(eq_no)
-
-    await interaction.followup.send(file=discord.File(img_path))
-```
-
----
-
-### 有震央資訊的呼叫方式
-
-如果你已經從氣象署 API 取得震央座標，可以一起帶進去：
-
-```python
-img_path = render_map(
-    eq_no     = '115017',
-    epicenter = {'lat': 23.97, 'lon': 121.6},
-    eq_type   = 'significant',   # 'significant' / 'small' / 'unknown'
+path = render_map(
+    eq_no       = '115067',
+    epicenter   = {'lat': 23.75, 'lon': 122.93},
+    eq_type     = 'significant',
+    output_path = f'temp/map_115067_{int(time.time())}.png',
 )
 ```
 
-`eq_type` 對應顯示文字：
-- `'significant'` → 顯著有感（紅色）
-- `'small'`       → 小區域有感
-- `'unknown'`     → 未報告地震
+- `eq_type`：`'significant'` 顯著有感（紅字）／`'small'` 小區域有感／`'unknown'` 未報告地震
+- 只給 `eq_no` 時會自己向 `https://www.twerg.org/api/dyfi-reports` 抓資料；`discord_reports` 可一起帶入 Discord 回報。
+- 已經抓好 API 資料時，用 `town_cdi=merge_town_cdi(data['townCDI'], discord_reports)` 傳進去，不會重抓。
+- 是同步函式，在 bot 裡請用 `run_in_executor` 或 `asyncio.to_thread` 執行，傳完記得刪檔。
 
 ---
 
-### 指定輸出路徑（避免多人同時使用蓋掉彼此的檔案）
+## 四、地震報告地圖
 
 ```python
-import os, time
+from module import cwa_report_map
 
-img_path = render_map(
-    eq_no       = eq_no,
-    output_path = f'temp/map_{eq_no}_{int(time.time())}.png'
-)
-
-await interaction.followup.send(file=discord.File(img_path))
-
-os.remove(img_path)   # 傳完刪掉，不佔空間
+buf = cwa_report_map.render_report_map(report)
 ```
 
-記得先建立 `temp/` 資料夾，或在 bot 啟動時加上：
-
-```python
-os.makedirs('temp', exist_ok=True)
-```
-
----
-
-### 完整範例
-
-```python
-import os, time, discord
-from discord import app_commands
-from discord.ext import commands
-from cogs.dyfi_map import render_map
-
-class DYFIMap(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @app_commands.command(name='dyfi', description='產生體感震度地圖')
-    @app_commands.describe(eq_no='地震編號，例如 115017')
-    async def dyfi(self, interaction: discord.Interaction, eq_no: str):
-        await interaction.response.defer()
-
-        try:
-            img_path = render_map(
-                eq_no       = eq_no,
-                output_path = f'temp/map_{eq_no}_{int(time.time())}.png'
-            )
-            await interaction.followup.send(file=discord.File(img_path))
-            os.remove(img_path)
-
-        except Exception as e:
-            await interaction.followup.send(f'地圖產生失敗：{e}')
-
-async def setup(bot):
-    await bot.add_cog(DYFIMap(bot))
-```
+`report` 是氣象署 `E-A0015-001` 的單筆地震；回傳 PNG 的 `BytesIO`，也可以傳 `output=` 寫到檔案。`view` 可指定 `"auto"`、`"focus"`、`"wide"`。
 
 ---
 
 ## 問題
 
-**Q：地圖上沒有圓圈?**
-A：表示該地震編號在 TWERG 資料庫裡還沒有回報資料，或 eq_no 格式錯誤。
+**Q：地圖上沒有圓圈？**
+A：該地震在 TWERG 還沒有回報資料，或 eq_no 格式錯誤（顯著有感為 6 位數字，小區域為 `s_` 加 14 位數字）。
 
-**Q：中文顯示亂碼或方框?**
-A：確認 `fonts/` 資料夾裡有放 `HarmonyOS_SansTC_*.ttf` 字型檔，且字型資料夾的位置在 `cogs/` 的上一層。
+**Q：中文顯示亂碼或方框？**
+A：確認 `fonts/` 裡有 `HarmonyOS_SansTC_*.ttf`。
