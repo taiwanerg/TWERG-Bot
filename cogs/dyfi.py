@@ -10,6 +10,7 @@ import os
 import time
 import logging
 from module.dyfi_map import render_map
+from module.dyfi_text import merge_town_cdi, town_lines, report_count_text
 from module.discord_dyfi import fetch_discord_reports
 
 # 這是當使用者輸入 /dyfi 指令時會查詢 CWA 地震資料，並整合官方體感回報與 Discord 使用者回報的模組
@@ -73,8 +74,6 @@ async def generate_dyfi_message(bot, eq_data, guild_id=None):
         dyfi_data = {}
 
     meta = dyfi_data.get("meta", {})
-    total_reports = meta.get("totalReports", 0)
-    valid_reports = meta.get("validReports", 0)
     calibrated_at_str = meta.get("calibratedAt", "")
     
     if calibrated_at_str:
@@ -90,26 +89,7 @@ async def generate_dyfi_message(bot, eq_data, guild_id=None):
         calibrated_discord_time = "無資料"
         map_stats_time = "無資料"
 
-    town_cdi = dyfi_data.get("townCDI", [])
-    
-    # 整合 discord_reports 到 town_cdi
-    if discord_reports:
-        discord_grade_cdi = {"0": 0.0, "1": 1.0, "2": 1.5, "3": 2.5, "4": 3.5, "5弱": 4.0, "5強": 4.5, "6弱": 5.0, "6強": 6.0, "7": 6.5}
-        for dr in discord_reports:
-            town_cdi.append({
-                "countyName": dr["county"],
-                "townName": dr["town"],
-                "grade": dr["grade"],
-                "cdi": discord_grade_cdi.get(str(dr["grade"]), 0.0),
-                "isSuspect": False,
-                "isDiscord": True
-            })
-        merged_towns = {}
-        for t in town_cdi:
-            key = f"{t.get('countyName', '')}|{t.get('townName', '')}"
-            if key not in merged_towns or t.get("cdi", 0.0) > merged_towns[key].get("cdi", 0.0):
-                merged_towns[key] = t
-        town_cdi = list(merged_towns.values())
+    town_cdi = merge_town_cdi(dyfi_data.get("townCDI", []), discord_reports)
 
     map_file = None
     if town_cdi:
@@ -121,7 +101,7 @@ async def generate_dyfi_message(bot, eq_data, guild_id=None):
         loop = asyncio.get_running_loop()
         def run_render():
             try:
-                return render_map(eq_no=current_no, epicenter=epicenter, eq_type=eq_type, output_path=output_path, discord_reports=discord_reports)
+                return render_map(eq_no=current_no, epicenter=epicenter, eq_type=eq_type, output_path=output_path, town_cdi=town_cdi)
             except Exception as e:
                 logging.warning(f"⚠️ 繪製地圖失敗: {e}")
                 return None
@@ -134,30 +114,7 @@ async def generate_dyfi_message(bot, eq_data, guild_id=None):
             os.remove(img_path)
             map_file = discord.File(fp=map_buf, filename="dyfi_map.png")
 
-        # 依據 grade 權重與精準的體感震度 cdi 值由大到小排序，並取出前 8 筆
-        grade_order = {"7": 10, "6強": 9, "6+": 9, "6弱": 8, "6-": 8, "5強": 7, "5+": 7, "5弱": 6, "5-": 6, "4": 5, "3": 4, "2": 3, "1": 2, "0": 1}
-        town_cdi.sort(key=lambda x: (grade_order.get(str(x.get("grade", "0")), 0), x.get("cdi", 0.0)), reverse=True)
-        grade_map = {
-            "0": "⚫", 
-            "1": "⚪", 
-            "2": "🔵", 
-            "3": "🟢", 
-            "4": "🟡", 
-            "5-": "🟠", "5弱": "🟠", 
-            "5+": "🟤", "5強": "🟤", 
-            "6-": "🔴", "6弱": "🔴", 
-            "6+": "🟣", "6強": "🟣", 
-            "7": "🛑"
-            }
-        top_towns = []
-        for town in town_cdi[:8]:
-            grade = str(town.get("grade", "0"))
-            emoji = grade_map.get(grade, "⚫")
-            fw_grade = grade.translate(str.maketrans("01234567-+", "０１２３４５６７－＋"))
-            grade_text = fw_grade if any(c in grade for c in ["弱", "強", "-", "+"]) else f"{fw_grade}級"
-            suspect_mark = " `⚠️`" if town.get("isSuspect") or str(town.get("anomalyWarning", 0)) == "1" else ""
-            discord_mark = " `💬`" if town.get("isDiscord") else ""
-            top_towns.append(f"`{emoji}` {grade_text}　{town.get('countyName', '')} {town.get('townName', '')}{suspect_mark}{discord_mark}")
+        top_towns = town_lines(town_cdi, 8)
         towns_value = "\n".join(top_towns) if top_towns else "目前無符合條件的回報資料"
     else:
         towns_value = "目前無回報資料"
@@ -171,9 +128,10 @@ async def generate_dyfi_message(bot, eq_data, guild_id=None):
     embed.add_field(name="規模", value=f"芮氏 {magnitude}", inline=True)
     embed.add_field(name="深度", value=f"{focal_depth} 公里", inline=True)
     embed.add_field(name="發生時間", value=discord_time, inline=False)
-    embed.add_field(name="📊 回報數量", value=f"{total_reports} 筆", inline=True)
+    embed.add_field(name="📊 回報數量", value=report_count_text(meta), inline=True)
     if wants_discord:
-        embed.add_field(name="💬 Discord 回報數量", value=f"{len(discord_reports)} 筆", inline=True)
+        embed.add_field(name="💬 Discord 回報數量", value=f"{len(discord_reports)} 份", inline=True)
+    embed.add_field(name="📍 回報鄉鎮", value=f"{len(town_cdi)} 個", inline=True)
     embed.add_field(name="最大回報內容", value=towns_value, inline=False)
     embed.set_footer(text=f"統計時間 {map_stats_time} • 地震資訊請以中央氣象署發佈為準")
     
