@@ -7,12 +7,14 @@ import json
 from datetime import datetime, timezone, timedelta
 
 from module import outbox, push_state
+from module.connection_status import ConnectionStatusLogger
 
 class RMTAutoPushCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.last_timestamp = push_state.load("rmt").get("last_timestamp")
         self.box = outbox.get(bot)
+        self.connection_status = ConnectionStatusLogger("RMT 推送")
         self.check_rmt_task.start()
 
     def cog_unload(self):
@@ -25,6 +27,7 @@ class RMTAutoPushCog(commands.Cog):
         
         try:
             async with self.bot.session.get(url) as response:
+                self.connection_status.succeeded()
                 if response.status != 200:
                     return
                 
@@ -78,7 +81,7 @@ class RMTAutoPushCog(commands.Cog):
                     await self.push_rmt_report(latest_record)
                     
         except Exception as e:
-            logging.error(f"❌ [RMT 推送] 檢查更新時發生錯誤：{e}")
+            self.connection_status.failed(e)
 
     async def push_rmt_report(self, record):
         try:

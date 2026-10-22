@@ -7,12 +7,14 @@ import json
 from datetime import datetime, timezone, timedelta
 
 from module import outbox, push_state
+from module.connection_status import ConnectionStatusLogger
 
 class GRMTAutoPushCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.last_timestamp = push_state.load("grmt").get("last_timestamp")
         self.box = outbox.get(bot)
+        self.connection_status = ConnectionStatusLogger("GRMT 推送")
         self.check_grmt_task.start()
 
     def cog_unload(self):
@@ -25,6 +27,7 @@ class GRMTAutoPushCog(commands.Cog):
         
         try:
             async with self.bot.session.get(url) as response:
+                self.connection_status.succeeded()
                 if response.status != 200:
                     return
                 
@@ -81,7 +84,7 @@ class GRMTAutoPushCog(commands.Cog):
                     await self.push_grmt_report(latest_record)
                     
         except Exception as e:
-            logging.error(f"❌ [GRMT 推送] 檢查更新時發生錯誤：{e}")
+            self.connection_status.failed(e)
 
     async def push_grmt_report(self, record):
         try:
