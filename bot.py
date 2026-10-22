@@ -74,6 +74,7 @@ class MyBot(commands.Bot):
     async def setup_hook(self):       
         # 使用 certifi 信任庫兼容 Windows，同時保留 TLS 憑證與主機名驗證。
         ssl_context = ssl.create_default_context(cafile=certifi.where())
+        ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
         self.session = aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(ssl=ssl_context),
             timeout=aiohttp.ClientTimeout(total=30),

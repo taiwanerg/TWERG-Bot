@@ -40,7 +40,7 @@ Its main purpose is to automatically push [TWERG "Did You Feel It?"](https://www
 ### 訊息防漏 Reliable Delivery
 
 - Discord 或網路暫時中斷時，推送會自動排隊、恢復後補發；bot 重開後也會補發離線期間（2 小時內）的地震報告。
-- 開發者：新增推送功能時請使用防漏系統，接入方式見 [`module/OUTBOX_接入說明.md`](module/OUTBOX_接入說明.md)。
+- 開發者：新增推送功能時請使用防漏系統，接入方式見 [`TECHNICAL.md`](TECHNICAL.md#outbox)。
 - When Discord or the network is temporarily unavailable, pushes are queued and delivered once it recovers; after a restart, earthquake reports missed while offline (within 2 hours) are sent as well.
 
 ### 即時查詢 Real-time Query

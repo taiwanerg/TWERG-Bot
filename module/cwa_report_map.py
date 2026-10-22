@@ -1,10 +1,6 @@
 import io
-import json
 import math
-import os
-import random
 import re
-import threading
 from datetime import datetime, timedelta, timezone
 
 import matplotlib
@@ -12,26 +8,19 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import font_manager
 from matplotlib.patches import PathPatch, Polygon as MplPolygon, Rectangle
 from matplotlib.path import Path
-from PIL import Image
 from shapely.affinity import translate
-from shapely.geometry import MultiPolygon, Point, Polygon
+from shapely.geometry import Point
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FONT_DIR = os.path.join(BASE_DIR, "fonts")
-TOPO_PATH = os.path.join(BASE_DIR, "maps", "towns-mercator-10t.json")
-TWERG_LOGO_PATH = os.path.join(BASE_DIR, "photos", "twerg_logo_clear.png")
+from module.map_base import cached, load_topo, logo, pick_spot, register_fonts, to_proj, to_shape, topo_arcs
 
 W, H, DPI = 1440, 1080, 100
 PX = 72 / DPI
 FAMILY = ["Pretendard", "HarmonyOS Sans TC"]
 
-LON_SCALE, LON_OFF = 161.4957, -19262.5674
-LAT_SCALE, LAT_OFF = -9012.2994, 4120.8375
 INSET_SHIFT = {"澎湖縣": (-22.7, -174.2), "金門縣": (-223.4, -30.9), "連江縣": (73.8, -218.7)}
 
 SEA = "#2B5292"
@@ -78,15 +67,6 @@ WIDE_FROM = "5-"
 WIDE_FLOOR = "4"
 EPI_CLEAR = 1.2
 
-_lock = threading.Lock()
-_cache = {}
-
-
-def to_proj(lon, lat):
-    x = LON_SCALE * lon + LON_OFF
-    y = LAT_SCALE * math.log(math.tan(math.pi / 4 + lat * math.pi / 360)) + LAT_OFF
-    return x, y
-
 
 def parse_level(text):
     s = str(text or "").strip()
@@ -106,55 +86,6 @@ def _rank(level):
     return LEVELS.index(level) if level in LEVELS else -1
 
 
-def _register_fonts():
-    if _cache.get("fonts"):
-        return
-    if os.path.isdir(FONT_DIR):
-        for name in os.listdir(FONT_DIR):
-            if name.lower().endswith((".otf", ".ttf")):
-                font_manager.fontManager.addfont(os.path.join(FONT_DIR, name))
-    _cache["fonts"] = True
-
-
-def _decode(topo):
-    sx, sy = topo["transform"]["scale"]
-    tx, ty = topo["transform"]["translate"]
-    arcs = []
-    for arc in topo["arcs"]:
-        x = y = 0
-        pts = []
-        for p in arc:
-            x += p[0]
-            y += p[1]
-            pts.append((x * sx + tx, y * sy + ty))
-        arcs.append(pts)
-    return arcs
-
-
-def _ring(idx, arcs):
-    out = []
-    for i in idx:
-        p = list(reversed(arcs[~i])) if i < 0 else arcs[i]
-        out.extend(p[1:] if out else p)
-    return out
-
-
-def _shape(g, arcs):
-    if g["type"] == "Polygon":
-        rings = [_ring(r, arcs) for r in g["arcs"]]
-        if not rings or len(rings[0]) < 3:
-            return None
-        return Polygon(rings[0], rings[1:])
-    if g["type"] == "MultiPolygon":
-        polys = []
-        for part in g["arcs"]:
-            rings = [_ring(r, arcs) for r in part]
-            if rings and len(rings[0]) >= 3:
-                polys.append(Polygon(rings[0], rings[1:]))
-        return MultiPolygon(polys) if polys else None
-    return None
-
-
 def _path(geoms):
     verts, codes = [], []
     for geom in geoms:
@@ -170,15 +101,15 @@ def _path(geoms):
 
 
 def _basemap():
-    with _lock:
-        if "basemap" in _cache:
-            return _cache["basemap"]
-    with open(TOPO_PATH, encoding="utf-8") as f:
-        topo = json.load(f)
-    arcs = _decode(topo)
+    return cached("cwa_basemap", _build_basemap)
+
+
+def _build_basemap():
+    topo = load_topo()
+    arcs = topo_arcs()
 
     def load(g):
-        geom = _shape(g, arcs)
+        geom = to_shape(g, arcs)
         if geom is None:
             return None, ""
         county = g.get("properties", {}).get("COUNTYNAME", "")
@@ -200,15 +131,12 @@ def _basemap():
     for t in towns:
         t["bounds"] = t["geom"].bounds
         t["prepared"] = prep(t["geom"])
-    result = {
+    return {
         "land": prep(unary_union([t["geom"] for t in towns])),
         "towns": towns,
         "town_path": _path([t["geom"] for t in towns]),
         "county_path": _path(counties),
     }
-    with _lock:
-        _cache["basemap"] = result
-    return result
 
 
 def _locate(base, x, y):
@@ -549,59 +477,21 @@ def _draw_footer(c, report):
     text = f"資料  中央氣象署  第 {no} 號地震報告" if no else "資料  中央氣象署"
     t = c.text(0, 0, text, 17, color=WHITE, weight="medium", z=41)
     brand = c.text(0, 0, "TWERG  @taiwanerg", 17, color=WHITE, weight="bold", z=41)
-    logo = _logo(26)
-    badge = logo.shape[1] + 8 if logo is not None else 0
-    lw = badge + 10 if logo is not None else 0
+    mark = logo(26)
+    badge = mark.shape[1] + 8 if mark is not None else 0
+    lw = badge + 10 if mark is not None else 0
     w = c.width(t) + c.width(brand) + lw + 70
     x0, y0, h = W - 24 - w, H - 24 - 40, 40
     c.rect(x0, y0, w, h, "#0A1236", alpha=0.78, z=40)
     t.set_position((x0 + 18, y0 + 26))
     bx = x0 + 18 + c.width(t) + 26
     c.ui.plot([bx - 13, bx - 13], [y0 + 10, y0 + h - 10], color="#8090C0", linewidth=1.2 * PX, zorder=41)
-    if logo is not None:
+    if mark is not None:
         c.rect(bx, y0 + 3, badge, h - 6, WHITE, z=41)
-        lx, ly = bx + 4, y0 + (h - logo.shape[0]) / 2
-        c.ui.imshow(logo, extent=(lx, lx + logo.shape[1], ly + logo.shape[0], ly), zorder=42, interpolation="lanczos")
+        lx, ly = bx + 4, y0 + (h - mark.shape[0]) / 2
+        c.ui.imshow(mark, extent=(lx, lx + mark.shape[1], ly + mark.shape[0], ly), zorder=42, interpolation="lanczos")
     brand.set_position((bx + lw, y0 + 26))
     return (x0, y0, x0 + w, y0 + h)
-
-
-def _logo(height, alpha=None):
-    key = ("logo", height, alpha)
-    if key in _cache:
-        return _cache[key]
-    if not os.path.isfile(TWERG_LOGO_PATH):
-        _cache[key] = None
-        return None
-    img = Image.open(TWERG_LOGO_PATH).convert("RGBA")
-    if alpha is not None:
-        img = Image.fromarray(_mono_logo(np.asarray(img).astype(np.float32) / 255.0, alpha), "RGBA")
-    ratio = height / img.height
-    img = img.resize((max(1, int(img.width * ratio)), int(height)), Image.LANCZOS)
-    arr = np.asarray(img).astype(np.float32) / 255.0
-    _cache[key] = arr
-    return arr
-
-
-def _mono_logo(arr, alpha):
-    r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
-    lum = 0.299 * r + 0.587 * g + 0.114 * b
-    orange = (a > 0.5) & (r > 0.8) & (g > 0.5) & (g < 0.85) & (b < 0.5)
-    rows =np.zeros(orange.shape, dtype=bool)
-    cols = np.zeros(orange.shape, dtype=bool)
-    for i, row in enumerate(orange):
-        idx = np.flatnonzero(row)
-        if idx.size:
-            rows[i, idx[0]:idx[-1] + 1] = True
-    for j, col in enumerate(orange.T):
-        idx = np.flatnonzero(col)
-        if idx.size:
-            cols[idx[0]:idx[-1] + 1, j] = True
-    inside = rows & cols
-    cut = np.where(inside, np.clip((0.6 - lum) / 0.3, 0.0, 1.0), 0.0)
-    out = np.ones_like(arr)
-    out[..., 3] = a * (1.0 - cut) * alpha
-    return (out * 255).round().astype(np.uint8)
 
 
 def _level_grid(base, data, view, step):
@@ -629,38 +519,32 @@ def _level_grid(base, data, view, step):
 
 
 def _draw_watermark(c, epi_px, blocks, tiles, size, base, data, view):
-    rng = random.SystemRandom()
-    wm = _logo(220, alpha=0.24)
+    wm = logo(220, alpha=0.24)
     if wm is None:
         return
     h, w = wm.shape[0], wm.shape[1]
     label = c.text(0, 0, "@taiwanerg", 26, color=WHITE, weight="bold", ha="center", alpha=0.3, z=30)
     bw = max(w, c.width(label))
     bh = h + 46
-    margin, pad, step = 30, 12, 20
+    step = 20
     grid = _level_grid(base, data, view, step)
-    best, best_key = [], None
-    for cx in range(int(bw / 2 + margin + pad), int(W - bw / 2 - margin - pad) + 1, 20):
-        for cy in range(int(bh / 2 + margin + pad), int(H - bh / 2 - margin - pad) + 1, 20):
-            l, t, r, b = cx - bw / 2 - pad, cy - bh / 2 - pad, cx + bw / 2 + pad, cy + bh / 2 + pad
-            if epi_px is not None and math.hypot(cx - epi_px[0], cy - epi_px[1]) < 200:
-                continue
-            if any(l < br and r > bl and t < bb and b > bt for bl, bt, br, bb in blocks):
-                continue
-            cells = grid[int((cy - bh / 2) // step):int((cy + bh / 2) // step) + 1, int((cx - bw / 2) // step):int((cx + bw / 2) // step) + 1]
-            on_land = cells[cells >= 0]
-            land_share = on_land.size / cells.size if cells.size else 0.0
-            covered = [_rank(lv) for px, py, lv in tiles if l - size / 2 < px < r + size / 2 and t - size / 2 < py < b + size / 2]
-            peak = max([int(on_land.max()) if on_land.size else 0] + covered)
-            key = (land_share >= 0.5, -peak, -len(covered), round(land_share * 10))
-            if best_key is None or key > best_key:
-                best, best_key = [(cx, cy)], key
-            elif key == best_key:
-                best.append((cx, cy))
-    if not best:
+
+    def score(cx, cy, box):
+        l, t, r, b = box
+        if epi_px is not None and math.hypot(cx - epi_px[0], cy - epi_px[1]) < 200:
+            return None
+        cells = grid[int((cy - bh / 2) // step):int((cy + bh / 2) // step) + 1, int((cx - bw / 2) // step):int((cx + bw / 2) // step) + 1]
+        on_land = cells[cells >= 0]
+        land_share = on_land.size / cells.size if cells.size else 0.0
+        covered = [_rank(lv) for px, py, lv in tiles if l - size / 2 < px < r + size / 2 and t - size / 2 < py < b + size / 2]
+        peak = max([int(on_land.max()) if on_land.size else 0] + covered)
+        return (land_share >= 0.5, -peak, -len(covered), round(land_share * 10))
+
+    spot = pick_spot((bw, bh), (W, H), (12, 30), step, blocks, score)
+    if spot is None:
         label.remove()
         return
-    cx, cy = rng.choice(best)
+    cx, cy = spot
     top = cy - bh / 2
     c.ui.imshow(wm, extent=(cx - w / 2, cx + w / 2, top + h, top), zorder=30, interpolation="lanczos")
     label.set_position((cx, top + h + 34))
@@ -683,7 +567,7 @@ def _list_height(groups):
 
 
 def render_report_map(report, output=None, view="auto"):
-    _register_fonts()
+    register_fonts()
     base = _basemap()
     data = analyze(report)
     mode = choose_view(data) if view == "auto" else view
