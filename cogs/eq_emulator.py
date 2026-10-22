@@ -7,7 +7,6 @@ import io
 import uuid
 import json
 import urllib.request
-from datetime import datetime, timezone, timedelta
 import logging
 from PIL import Image, ImageDraw, ImageFont
 
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # 這是一個非常簡易的地震模擬模組，由於我不熟悉這方面的算法，如果覺得有可以改進的地方請丟 PR 
 
-from module.map_base import load_topo
+from module.map_base import load_topo, logo
 
 CDI_MAP = [
     (0.35, '#4b5563', '0',   '無感'),
@@ -477,10 +476,9 @@ def render_emulator_map_pil(mag, depth, lon, lat, fault_type):
     if depth > 35 and ((lat > 23.5 and lon > 121.5) or (lat < 23.0 and lon < 121.5) or depth > 45):
         is_subduction = True
 
-    # 繪製左下角參數與時間 (無 Saiu-bot 提示)
-    current_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+    # 繪製左下角參數
     sub_text = "是" if is_subduction else "否"
-    time_text = f"參數\n規模 {mag} | 深度 {depth}km\n經度 {lon} | 緯度 {lat}\n{fault_type} | 隱沒帶: {sub_text}\n\n模擬時間 {current_time}"
+    time_text = f"參數\n規模 {mag} | 深度 {depth}km\n經度 {lon} | 緯度 {lat}\n{fault_type} | 隱沒帶: {sub_text}"
     
     if hasattr(draw, 'multiline_textbbox'):
         text_bbox = draw.multiline_textbbox((0, 0), time_text, font=font_time)
@@ -503,9 +501,38 @@ def render_emulator_map_pil(mag, depth, lon, lat, fault_type):
         target_size = int(size / scale)
         c_img = c_img.resize((target_size, target_size), Image.LANCZOS)
         
-        paste_x = int(cx - target_size / 2)
-        paste_y = int(cy - target_size / 2)
+        # 圓形縮圖後是奇數像素，以實際中心像素對準地圖座標。
+        radius_px = (target_size - 1) / 2
+        paste_x = round(cx - radius_px)
+        paste_y = round(cy - radius_px)
         target_img.paste(c_img, (paste_x, paste_y), mask=c_img)
+
+        return paste_x + radius_px, paste_y + radius_px
+
+    def draw_centered_glyph(target_img, cx, cy, text, font, fill):
+        """依字形實際繪製出來的像素邊界置中，避免字體留白造成視覺偏移。"""
+        bbox = font.getbbox(text)
+        padding = 2
+        mask_w = max(1, bbox[2] - bbox[0] + padding * 2)
+        mask_h = max(1, bbox[3] - bbox[1] + padding * 2)
+        mask = Image.new('L', (mask_w, mask_h), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.text(
+            (padding - bbox[0], padding - bbox[1]),
+            text,
+            fill=255,
+            font=font,
+        )
+
+        ink_bbox = mask.getbbox()
+        if ink_bbox is None:
+            return
+
+        glyph_mask = mask.crop(ink_bbox)
+        glyph_x = round(cx - (glyph_mask.width - 1) / 2)
+        glyph_y = round(cy - (glyph_mask.height - 1) / 2)
+        glyph = Image.new('RGBA', glyph_mask.size, fill)
+        target_img.paste(glyph, (glyph_x, glyph_y), glyph_mask)
 
     # 計算各鄉鎮震度並排序
     town_results = []
@@ -569,9 +596,14 @@ def render_emulator_map_pil(mag, depth, lon, lat, fault_type):
         px, py, cdi = res['px'], res['py'], res['cdi']
         col, grade, label = cdi_style(cdi)
         rpx = 12
-        draw_aa_circle(img, px, py, rpx, fill=col, outline='white', width=1)
+        marker_cx, marker_cy = draw_aa_circle(img, px, py, rpx, fill=col, outline='white', width=1)
         
-        grade_str = str(grade).replace('弱', '-').replace('強', '+')
+        grade_str = {
+            '5弱': '5-',
+            '5強': '5+',
+            '6弱': '6-',
+            '6強': '6+',
+        }.get(str(grade), str(grade))
         
         # 依照背景色亮度決定文字顏色
         h = col.lstrip('#')
@@ -579,11 +611,14 @@ def render_emulator_map_pil(mag, depth, lon, lat, fault_type):
         lum = 0.299 * r + 0.587 * g + 0.114 * b
         text_col = 'white' if lum < 128 else '#1a1a1a'
         
-        # 以實際字形外框置中，避免不同字數（例如 5-/5+）或字型度量造成偏移。
-        text_left, text_top, text_right, text_bottom = draw.textbbox((0, 0), grade_str, font=font_intensity)
-        text_x = px - (text_left + text_right) / 2
-        text_y = py - (text_top + text_bottom) / 2
-        draw.text((text_x, text_y), grade_str, fill=text_col, font=font_intensity)
+        draw_centered_glyph(
+            img,
+            marker_cx,
+            marker_cy,
+            grade_str,
+            font_intensity,
+            text_col,
+        )
 
     # 繪製震央
     epx, epy = lonlat_to_img(lon, lat)
@@ -596,35 +631,37 @@ def render_emulator_map_pil(mag, depth, lon, lat, fault_type):
     draw.line((epx - cross_size, epy - cross_size, epx + cross_size, epy + cross_size), fill="#ff3333", width=8)
     draw.line((epx - cross_size, epy + cross_size, epx + cross_size, epy - cross_size), fill="#ff3333", width=8)
 
-    # 繪製浮水印
+    # 繪製中央大型提示浮水印。
     watermark_text1 = "地震模擬"
     watermark_text2 = "非真實地震"
-    
-    if hasattr(draw, 'textbbox'):
-        bbox1 = draw.textbbox((0, 0), watermark_text1, font=font_watermark_1)
-        w1 = bbox1[2] - bbox1[0]
-        h1 = bbox1[3] - bbox1[1]
-        
-        bbox2 = draw.textbbox((0, 0), watermark_text2, font=font_watermark_2)
-        w2 = bbox2[2] - bbox2[0]
-        h2 = bbox2[3] - bbox2[1]
-    else:
-        w1, h1 = draw.textsize(watermark_text1, font=font_watermark_1)
-        w2, h2 = draw.textsize(watermark_text2, font=font_watermark_2)
-        
+    bbox1 = draw.textbbox((0, 0), watermark_text1, font=font_watermark_1)
+    bbox2 = draw.textbbox((0, 0), watermark_text2, font=font_watermark_2)
+    w1, h1 = bbox1[2] - bbox1[0], bbox1[3] - bbox1[1]
+    w2, h2 = bbox2[2] - bbox2[0], bbox2[3] - bbox2[1]
     wm_spacing = 20
-    total_h = h1 + wm_spacing + h2
-    start_y = (IMG_H - total_h) / 2
-    
-    # 建立一個與原圖等大的透明圖層來畫半透明浮水印（防止字體邊緣不平滑問題）
+    start_y = (IMG_H - h1 - wm_spacing - h2) / 2
+
     wm_overlay = Image.new('RGBA', img.size, (255, 255, 255, 0))
     wm_draw = ImageDraw.Draw(wm_overlay)
-    
     wm_draw.text(((IMG_W - w1) / 2, start_y), watermark_text1, fill=(255, 255, 255, 40), font=font_watermark_1)
     wm_draw.text(((IMG_W - w2) / 2, start_y + h1 + wm_spacing), watermark_text2, fill=(255, 255, 255, 40), font=font_watermark_2)
-    
     img = Image.alpha_composite(img, wm_overlay)
-    draw = ImageDraw.Draw(img) # 更新 draw 物件以便後續圖例能畫在新的 img 上
+    draw = ImageDraw.Draw(img)
+
+    # 將其他地圖模組共用的 TWERG 浮水印固定放在標題下方的左上海域。
+    watermark = logo(105, alpha=0.24)
+    if watermark is not None:
+        watermark_img = Image.fromarray((watermark * 255).round().astype('uint8'), 'RGBA')
+        watermark_x = 30
+        watermark_y = 92
+        img.alpha_composite(watermark_img, (watermark_x, watermark_y))
+
+        watermark_label = "@taiwanerg"
+        label_bbox = draw.textbbox((0, 0), watermark_label, font=font_legend)
+        label_w = label_bbox[2] - label_bbox[0]
+        label_x = watermark_x + (watermark_img.width - label_w) / 2
+        label_y = watermark_y + watermark_img.height + 4
+        draw.text((label_x, label_y), watermark_label, fill=(255, 255, 255, 77), font=font_legend)
 
     # 繪製右下角圖例
     leg = [(col, grade, label) for maxc, col, grade, label in CDI_MAP if maxc > 0.35]
