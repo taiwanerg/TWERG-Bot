@@ -12,6 +12,25 @@ from module.yt_chart import get_viewer_history, record_viewer_count, render_view
 from module import outbox
 
 YT_ALERT_TTL = 15 * 60
+YT_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=20)
+YT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def parse_live_viewers(html):
+    """從 YouTube 頁面內嵌資料擷取直播同時觀看人數。"""
+    patterns = (
+        r'>([\d,]+)</span><span[^>]*>\s*人正在觀看',
+        r'"text":"([\d,]+)"\}\s*,\s*\{"text":"\s*人正在觀看"',
+        r'"viewCountText":\{"simpleText":"([\d,]+)\s*人正在觀看"',
+        r'"concurrentViewers":"(\d+)"',
+        r'"viewCount":"(\d+)"',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            return int(match.group(1).replace(',', ''))
+    return None
+
 
 class YouTubeAlertCog(commands.Cog):
     def __init__(self, bot):
@@ -40,39 +59,29 @@ class YouTubeAlertCog(commands.Cog):
     async def get_live_viewers(self):
         """爬取 YouTube 頁面獲取直播觀看人數"""
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+            "User-Agent": "TWERG-Bot/1.9 (+https://github.com/Nanporo/TWERG-Bot)",
+            "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            # 不宣告 Brotli，避免部署環境缺少 Brotli 解碼器時觸發 ClientPayloadError。
+            "Accept-Encoding": "gzip, deflate",
         }
         try:
-            async with self.bot.session.get(self.video_url, headers=headers) as response:
+            async with self.bot.session.get(
+                self.video_url,
+                headers=headers,
+                timeout=YT_REQUEST_TIMEOUT,
+            ) as response:
                 if response.status != 200:
+                    logging.warning(f"⚠️ YouTube 回應狀態碼：{response.status}")
                     return None
-                html = await response.text()
-                
-                # 1. 嘗試依據提供的 HTML 標籤結構尋找 (例如 <span>659</span><span> 人正在觀看</span>)
-                match = re.search(r'>([\d,]+)</span><span[^>]*>\s*人正在觀看', html)
-                if match:
-                    return int(match.group(1).replace(',', ''))
-
-                # 2. 嘗試從 YouTube 內嵌的 JSON 資料中尋找 (aiohttp 取得的原始碼通常為 JSON 結構)
-                match = re.search(r'"text":"([\d,]+)"\}\s*,\s*\{"text":"\s*人正在觀看"', html)
-                if match:
-                    return int(match.group(1).replace(',', ''))
-                    
-                match = re.search(r'"viewCountText":\{"simpleText":"([\d,]+)\s*人正在觀看"', html)
-                if match:
-                    return int(match.group(1).replace(',', ''))
-
-                # 3. 嘗試原有的 concurrentViewers 或是 viewCount 數據
-                match = re.search(r'"concurrentViewers":"(\d+)"', html)
-                if match:
-                    return int(match.group(1))
-                    
-                match = re.search(r'"viewCount":"(\d+)"', html)
-                if match:
-                    return int(match.group(1))
-                    
-                return None
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    body.extend(chunk)
+                    if len(body) > YT_MAX_RESPONSE_BYTES:
+                        logging.error("❌ YouTube 回應超過 8 MiB 安全上限")
+                        return None
+                encoding = response.charset or "utf-8"
+                html = body.decode(encoding, errors="replace")
+                return parse_live_viewers(html)
         except Exception as e:
             logging.error(f"❌ 獲取 YouTube 觀看人數失敗：{e}")
             return None

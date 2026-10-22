@@ -69,8 +69,12 @@ cd TWERG-Bot
 
 **安裝所需套件 (Install dependencies)**
 ```bash
-pip install discord.py geopandas matplotlib shapely pillow
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
+
+Windows PowerShell 請以 `.venv\Scripts\Activate.ps1` 取代 `source` 指令。
 
 ### 設定檔 (Configuration)
 

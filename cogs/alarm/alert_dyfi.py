@@ -1,7 +1,6 @@
 import logging
 import discord
 from discord.ext import commands
-import aiohttp
 import asyncio
 from datetime import datetime, timezone, timedelta
 import json
@@ -106,8 +105,7 @@ class DyfiReportCog(commands.Cog):
         url = f"https://www.twerg.org/api/dyfi-reports?eq_no={eq_no}"
         
         try:
-            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-                async with session.get(url) as response:
+            async with self.bot.session.get(url) as response:
                     if response.status != 200:
                         logging.warning(f"⚠️ 無法取得 TWERG 體感回報資料，狀態碼：{response.status}")
                         self.retry_later(retry_args)

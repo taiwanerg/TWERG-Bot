@@ -1,4 +1,5 @@
 .DS_Store
+/.venv/
 /cogs/__pycache__
 run.bat
 config.json
