@@ -16,7 +16,26 @@ logger = logging.getLogger(__name__)
 # 這是一個非常簡易的地震模擬模組，由於我不熟悉這方面的算法，如果覺得有可以改進的地方請丟 PR 
 
 # 匯入 dyfi_map 的共用模組
-from module.dyfi_map import TOPO_LOCAL, load_topo, CDI_MAP, cdi_style
+from module.dyfi_map import TOPO_LOCAL, load_topo
+
+CDI_MAP = [
+    (0.35, '#4b5563', '0',   '無感'),
+    (1.10, '#6cbb6c', '1',   '微震'),
+    (1.90, '#00AAFF', '2',   '輕震'),
+    (2.80, '#0041FF', '3',   '弱震'),
+    (3.70, '#FAE696', '4',   '中震'),
+    (4.35, '#FFE600', '5弱', '強震'),
+    (4.85, '#FF9900', '5強', '強震'),
+    (5.55, '#FF2800', '6弱', '烈震'),
+    (6.30, '#A50021', '6強', '烈震'),
+    (7.00, '#B40068', '7',   '劇震'),
+]
+
+def cdi_style(cdi):
+    for maxc, col, grade, label in CDI_MAP:
+        if cdi <= maxc:
+            return col, grade, label
+    return CDI_MAP[-1][1], CDI_MAP[-1][2], CDI_MAP[-1][3]
 
 def distance(lat1, lon1, lat2, lon2):
     R = 6371.0

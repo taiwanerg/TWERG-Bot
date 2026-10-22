@@ -15,6 +15,7 @@ try:
     from module.dyfi_map import render_map
 except ImportError:
     render_map = None
+from module.dyfi_text import merge_town_cdi, town_lines, report_count_text
 from module.discord_dyfi import fetch_discord_reports
 from module import outbox
 
@@ -150,27 +151,11 @@ class DyfiReportCog(commands.Cog):
                                 title=f"30分鐘初步統計",
                                 color=0x3498db
                             )
-                            embed.add_field(name="📊 回報數量", value=f"{total_reports} 筆", inline=True)
+                            town_cdi = merge_town_cdi(town_cdi, current_discord_reports)
+                            embed.add_field(name="📊 回報數量", value=report_count_text(meta), inline=True)
                             if include_discord:
-                                embed.add_field(name="💬 Discord 回報數量", value=f"{len(current_discord_reports)} 筆", inline=True)
-                            
-                            if current_discord_reports:
-                                discord_grade_cdi = {"0": 0.0, "1": 1.0, "2": 1.5, "3": 2.5, "4": 3.5, "5弱": 4.0, "5強": 4.5, "6弱": 5.0, "6強": 6.0, "7": 6.5}
-                                for dr in current_discord_reports:
-                                    town_cdi.append({
-                                        "countyName": dr["county"],
-                                        "townName": dr["town"],
-                                        "grade": dr["grade"],
-                                        "cdi": discord_grade_cdi.get(str(dr["grade"]), 0.0),
-                                        "isSuspect": False,
-                                        "isDiscord": True
-                                    })
-                                merged_towns = {}
-                                for t in town_cdi:
-                                    t_key = f"{t.get('countyName', '')}|{t.get('townName', '')}"
-                                    if t_key not in merged_towns or t.get("cdi", 0.0) > merged_towns[t_key].get("cdi", 0.0):
-                                        merged_towns[t_key] = t
-                                town_cdi = list(merged_towns.values())
+                                embed.add_field(name="💬 Discord 回報數量", value=f"{len(current_discord_reports)} 份", inline=True)
+                            embed.add_field(name="📍 回報鄉鎮", value=f"{len(town_cdi)} 個", inline=True)
 
                             map_bytes = None
                             if town_cdi:
@@ -180,35 +165,20 @@ class DyfiReportCog(commands.Cog):
                                     eq_type = 'significant' if str(eq_no).isdigit() else 'small'
                                     
                                     loop = asyncio.get_running_loop()
-                                    def run_render(path, dr_reports):
+                                    def run_render(path, towns):
                                         try:
-                                            return render_map(eq_no=eq_no, epicenter=epicenter, eq_type=eq_type, output_path=path, discord_reports=dr_reports)
+                                            return render_map(eq_no=eq_no, epicenter=epicenter, eq_type=eq_type, output_path=path, town_cdi=towns)
                                         except Exception as e:
                                             logging.warning(f"⚠️ 繪製地圖失敗: {e}")
                                             return None
-                                            
-                                    img_path = await loop.run_in_executor(None, run_render, output_path, current_discord_reports)
+
+                                    img_path = await loop.run_in_executor(None, run_render, output_path, town_cdi)
                                     if img_path and os.path.exists(img_path):
                                         with open(img_path, 'rb') as f_img:
                                             map_bytes = f_img.read()
                                         os.remove(img_path)
 
-                                grade_order = {"7": 10, "6強": 9, "6+": 9, "6弱": 8, "6-": 8, "5強": 7, "5+": 7, "5弱": 6, "5-": 6, "4": 5, "3": 4, "2": 3, "1": 2, "0": 1}
-                                town_cdi.sort(key=lambda x: (grade_order.get(str(x.get("grade", "0")), 0), x.get("cdi", 0.0)), reverse=True)
-                                
-                                grade_map = {"0": "⚫", "1": "⚪", "2": "🔵", "3": "🟢", "4": "🟡", "5-": "🟠", "5弱": "🟠", "5+": "🟤", "5強": "🟤", "6-": "🔴", "6弱": "🔴", "6+": "🟣", "6強": "🟣", "7": "🛑"}
-                                top_towns = []
-                                for town in town_cdi[:10]:
-                                    county = town.get("countyName", "")
-                                    town_name = town.get("townName", "")
-                                    grade = str(town.get("grade", "0"))
-                                    emoji = grade_map.get(grade, "⚫")
-                                    fw_grade = grade.translate(str.maketrans("01234567-+", "０１２３４５６７－＋"))
-                                    grade_text = fw_grade if any(c in grade for c in ["弱", "強", "-", "+"]) else f"{fw_grade}級"
-                                    suspect_mark = " `⚠️`" if town.get("isSuspect") or str(town.get("anomalyWarning", 0)) == "1" else ""
-                                    discord_mark = " `💬`" if town.get("isDiscord") else ""
-                                    top_towns.append(f"`{emoji}` {grade_text}　{county} {town_name}{suspect_mark}{discord_mark}")
-                                
+                                top_towns = town_lines(town_cdi, 10)
                                 towns_value = "\n".join(top_towns) if top_towns else "目前無符合條件的回報資料"
                             else:
                                 towns_value = "目前無回報資料"
