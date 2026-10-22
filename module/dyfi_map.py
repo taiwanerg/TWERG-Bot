@@ -1,5 +1,5 @@
 import logging
-import json, math, os, random, urllib.request, ssl
+import json, math, urllib.request, ssl
 import certifi
 import matplotlib
 
@@ -7,20 +7,20 @@ ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.patches import Circle, Rectangle, FancyBboxPatch
+from matplotlib.collections import LineCollection, PatchCollection
+from matplotlib.patches import Circle, Rectangle, FancyBboxPatch, PathPatch
+from matplotlib.path import Path
 from matplotlib import font_manager
 import numpy as np
-from shapely.geometry import Polygon, MultiPolygon, Point
+import shapely
+from shapely.geometry import Point
 from shapely.ops import unary_union
 from shapely.prepared import prep
-import geopandas as gpd
-from module.cwa_report_map import _logo
+from module.map_base import cached, load_topo, logo, pick_spot, register_fonts, to_proj, to_shape, topo_arcs
 from module.dyfi_text import CDI_MAP, GRADE_STYLE, norm, grade_of, town_rank, merge_town_cdi
 
 # 這是 DYFI 的地圖圖片生成模組
 
-TOPO_LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'maps/towns-mercator-10t.json')
-TOPO_URL   = 'https://cdn.jsdelivr.net/npm/taiwan-atlas/towns-mercator-10t.json'
 API_BASE   = 'https://www.twerg.org/api/dyfi-reports'
 
 MAP_W, MAP_H, DPI = 700, 820, 100
@@ -30,23 +30,18 @@ AREA_H = MAP_H - 84
 # matplotlib pt = SVG px * 72 / DPI = SVG px * 0.72
 PT = 72 / DPI
 
-LON_SCALE, LON_OFF =  161.4957, -19262.5674
-LAT_SCALE, LAT_OFF = -9012.2994,   4120.8375
-
 NOT_FELT_STROKE = '#8a929b'
 
 WM_HEIGHT = 96
 WM_EPI_CLEAR = 100
 BRAND_LOGO_H = 40
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_FONT_DIR   = os.path.join(_SCRIPT_DIR, '..', 'fonts')
+HEADER_BLOCK = (0, 0, MAP_W, 48)
+FOOTER_BLOCK = (0, MAP_H-30, MAP_W, MAP_H)
+
 _FONT_NAME  = 'HarmonyOS Sans TC'
 
-if os.path.isdir(_FONT_DIR):
-    for _f in os.listdir(_FONT_DIR):
-        if _f.lower().endswith('.ttf'):
-            font_manager.fontManager.addfont(os.path.join(_FONT_DIR, _f))
+if register_fonts():
     plt.rcParams['font.family'] = _FONT_NAME
 else:
     _available = {f.name for f in font_manager.fontManager.ttflist}
@@ -55,209 +50,81 @@ else:
             plt.rcParams['font.family'] = _pref
             break
 
-def to_proj(lon, lat):
-    x = LON_SCALE * lon + LON_OFF
-    y = LAT_SCALE * math.log(math.tan(math.pi/4 + lat*math.pi/360)) + LAT_OFF
-    return x, y
-
 def r_px(n):
     if not n or n < 1: return 5
     return 5 + min(1, math.log(max(1, n)) / math.log(50)) * 15
-
-def load_topo():
-    if os.path.isfile(TOPO_LOCAL):
-        with open(TOPO_LOCAL, encoding='utf-8') as f:
-            return json.load(f)
-    req = urllib.request.Request(TOPO_URL, headers={'User-Agent': 'TWERG-Bot/1.0'})
-    with urllib.request.urlopen(req, context=ssl_ctx) as r:
-        return json.loads(r.read())
 
 def fetch_json(url):
     req = urllib.request.Request(url, headers={'User-Agent': 'TWERG-Bot/1.0'})
     with urllib.request.urlopen(req, context=ssl_ctx) as r:
         return json.loads(r.read())
 
-def decode_arcs(topo):
-    tr = topo.get('transform', {})
-    sx, sy = tr.get('scale',    [1, 1])
-    tx, ty = tr.get('translate',[0, 0])
-    out = []
-    for arc in topo['arcs']:
-        ax0 = ay0 = 0
-        pts = []
-        for pt in arc:
-            ax0 += pt[0]; ay0 += pt[1]
-            pts.append([ax0*sx+tx, ay0*sy+ty])
-        out.append(pts)
-    return out
+def _polygon_patch(geom):
+    parts = [geom] if geom.geom_type == 'Polygon' else geom.geoms
+    paths = []
+    for part in parts:
+        paths.append(Path(np.asarray(part.exterior.coords)[:, :2], closed=True))
+        paths.extend(Path(np.asarray(ring.coords)[:, :2], closed=True) for ring in part.interiors)
+    return PathPatch(Path.make_compound_path(*paths))
 
-def arc_pts(idx, arcs):
-    return list(reversed(arcs[~idx])) if idx < 0 else arcs[idx]
+def _boundary_segments(geoms):
+    lines = shapely.get_parts(shapely.normalize(shapely.boundary(np.asarray(geoms, dtype=object))))
+    return [np.array(line.coords)[:, :2] for line in lines]
 
-def build_rings(ridx, arcs):
-    result = []
-    for ring in ridx:
-        coords = []
-        for idx in ring:
-            p = arc_pts(idx, arcs)
-            coords.extend(p[1:] if coords else p)
-        result.append(coords)
-    return result
+def _basemap():
+    return cached('dyfi_basemap', _build_basemap)
 
-def to_shape(g, arcs):
-    t = g['type']
-    if t == 'Polygon':
-        rs = build_rings(g['arcs'], arcs)
-        if not rs or len(rs[0]) < 3: return None
-        return Polygon(rs[0], rs[1:])
-    if t == 'MultiPolygon':
-        polys = []
-        for pa in g['arcs']:
-            rs = build_rings(pa, arcs)
-            if rs and len(rs[0]) >= 3:
-                polys.append(Polygon(rs[0], rs[1:]))
-        return MultiPolygon(polys) if polys else None
-    return None
-
-def place_watermark(fig, ax, nation, dots, blocks, epi_px):
-    wm = _logo(WM_HEIGHT, alpha=0.24)
-    if wm is None:
-        return
-    h, w = wm.shape[0], wm.shape[1]
-    label_h = 24
-    bw, bh = max(w, 92), h + label_h
-    step, pad = 10, 6
-    land = prep(nation)
-    inv = ax.transData.inverted()
-    gw, gh = MAP_W // step, MAP_H // step
-    grid = np.zeros((gh, gw), dtype=bool)
-    for gy in range(gh):
-        for gx in range(gw):
-            x, y = inv.transform(((gx + 0.5) * step, MAP_H - (gy + 0.5) * step))
-            grid[gy, gx] = land.contains(Point(x, y))
-    best, best_key = [], None
-    for cx in range(int(bw / 2 + pad), int(MAP_W - bw / 2 - pad) + 1, step):
-        for cy in range(int(bh / 2 + pad), int(MAP_H - bh / 2 - pad) + 1, step):
-            l, t, r, b = cx - bw / 2 - pad, cy - bh / 2 - pad, cx + bw / 2 + pad, cy + bh / 2 + pad
-            if epi_px is not None and math.hypot(cx - epi_px[0], cy - epi_px[1]) < WM_EPI_CLEAR:
-                continue
-            if any(l < br and r > bl and t < bb and b > bt for bl, bt, br, bb in blocks):
-                continue
-            cells = grid[int((cy - bh / 2) // step):int((cy + bh / 2) // step) + 1,
-                         int((cx - bw / 2) // step):int((cx + bw / 2) // step) + 1]
-            land_share = cells.mean() if cells.size else 0.0
-            covered = sum(1 for px, py, pr in dots if l - pr < px < r + pr and t - pr < py < b + pr)
-            key = (land_share >= 0.5, -covered, round(land_share * 10))
-            if best_key is None or key > best_key:
-                best, best_key = [(cx, cy)], key
-            elif key == best_key:
-                best.append((cx, cy))
-    if not best:
-        return
-    cx, cy = random.SystemRandom().choice(best)
-    top = cy - bh / 2
-    wax = fig.add_axes([0, 0, 1, 1], zorder=20)
-    wax.axis('off')
-    wax.imshow(wm, extent=(cx - w / 2, cx + w / 2, top + h, top), interpolation='lanczos')
-    wax.text(cx, top + h + label_h / 2, '@taiwanerg', color='white', alpha=0.3,
-             fontsize=13*PT, fontweight='bold', ha='center', va='center')
-    wax.set_xlim(0, MAP_W); wax.set_ylim(MAP_H, 0)
-
-def draw_brand(fig):
-    logo = _logo(BRAND_LOGO_H - 8)
-    x0, bottom = 14, 38
-    tx = x0
-    if logo is not None:
-        lh, lw = logo.shape[0], logo.shape[1]
-        bw = max(BRAND_LOGO_H, lw + 8)
-        bax = fig.add_axes([x0/MAP_W, bottom/MAP_H, bw/MAP_W, BRAND_LOGO_H/MAP_H])
-        bax.set_xlim(0, bw); bax.set_ylim(BRAND_LOGO_H, 0); bax.axis('off')
-        bax.add_patch(FancyBboxPatch((0.5, 0.5), bw-1, BRAND_LOGO_H-1, boxstyle='round,pad=0,rounding_size=6',
-                                     facecolor='white', edgecolor='none'))
-        lx, ly = (bw - lw) / 2, (BRAND_LOGO_H - lh) / 2
-        bax.imshow(logo, extent=(lx, lx + lw, ly + lh, ly), interpolation='lanczos', zorder=2)
-        bax.set_xlim(0, bw); bax.set_ylim(BRAND_LOGO_H, 0)
-        tx = x0 + bw + 10
-    tax = fig.add_axes([tx/MAP_W, bottom/MAP_H, 120/MAP_W, BRAND_LOGO_H/MAP_H])
-    tax.set_xlim(0, 120); tax.set_ylim(0, BRAND_LOGO_H); tax.axis('off')
-    tax.text(0, BRAND_LOGO_H*0.70, '地牛記錄小組', color='#d0d0d0', fontsize=15*PT, fontweight='bold', va='center')
-    tax.text(0, BRAND_LOGO_H*0.22, '@taiwanerg',   color='#8c8c8c', fontsize=12*PT, fontweight='bold', va='center')
-    return (x0 - 4, MAP_H - bottom - BRAND_LOGO_H - 4, tx + 120, MAP_H - bottom + 4)
-
-def render_map(eq_no, epicenter=None, eq_type='unknown', output_path=None, discord_reports=None, town_cdi=None):
-    topo    = load_topo()
-    arcs    = decode_arcs(topo)
-    if town_cdi is None:
-        data     = fetch_json(f'{API_BASE}?eq_no={eq_no}')
-        town_cdi = merge_town_cdi(data.get('townCDI', []), discord_reports)
-    reports = town_cdi
-
-    rows = []
-    for g in topo['objects']['towns']['geometries']:
+def _build_basemap():
+    arcs = topo_arcs()
+    towns = []
+    for g in load_topo()['objects']['towns']['geometries']:
         props = g.get('properties', {})
         shp   = to_shape(g, arcs)
         if shp and shp.is_valid:
-            rows.append({'geometry': shp,
-                         'county': props.get('COUNTYNAME', ''),
-                         'town':   props.get('TOWNNAME',   '')})
-
-    gdf = gpd.GeoDataFrame(rows, crs=None)
-    bnd = gdf.total_bounds
-    dx, dy = bnd[2]-bnd[0], bnd[3]-bnd[1]
-
-    county_gdf = gpd.GeoDataFrame(
-        geometry=[unary_union(gdf[gdf['county']==c]['geometry'])
-                  for c in gdf['county'].unique()], crs=None)
-    nation = unary_union(gdf['geometry'])
-
-    ppd   = min(AREA_W/dx, AREA_H/dy)
-    x_pad = (AREA_W/ppd - dx) / 2
-    y_pad = (AREA_H/ppd - dy) / 2
-
-    def rd(px): return px / ppd
-
-    fig = plt.figure(figsize=(MAP_W/DPI, MAP_H/DPI), dpi=DPI)
-    fig.patch.set_facecolor('#0f1113')
-
-    ax = fig.add_axes([18/MAP_W, 30/MAP_H, AREA_W/MAP_W, AREA_H/MAP_H])
-    ax.set_facecolor('#0f1113')
-    ax.axis('off')
-
-    gdf.plot(ax=ax, color='#1a1d20', edgecolor='#292e33', linewidth=0.35)
-    county_gdf.boundary.plot(ax=ax, color='#3e454b', linewidth=0.8)
-    gpd.GeoDataFrame(geometry=[nation], crs=None).boundary.plot(
-        ax=ax, color='#4a5260', linewidth=1.2)
-
-    ax.set_xlim(bnd[0]-x_pad, bnd[2]+x_pad)
-    ax.set_ylim(bnd[3]+y_pad, bnd[1]-y_pad)
-    ax.set_aspect('equal', adjustable='box')
-    ax.apply_aspect()
-
+            towns.append((props.get('COUNTYNAME', ''), props.get('TOWNNAME', ''), shp))
+    geoms = [shp for _, _, shp in towns]
+    county_names = list(dict.fromkeys(c for c, _, _ in towns))
+    counties = [unary_union([shp for c, _, shp in towns if c == name]) for name in county_names]
+    nation = unary_union(geoms)
     centroids = {}
-    for _, row in gdf.iterrows():
-        key = f"{norm(row['county'])}|{row['town']}"
-        c   = row['geometry'].centroid
-        centroids[key] = (c.x, c.y)
+    for county, town, shp in towns:
+        c = shp.centroid
+        centroids[f"{norm(county)}|{town}"] = (c.x, c.y)
+    return {
+        'towns': list(shapely.normalize(np.asarray(geoms, dtype=object))),
+        'county_segments': _boundary_segments(counties),
+        'nation_segments': _boundary_segments([nation]),
+        'nation': prep(nation),
+        'bounds': shapely.total_bounds(np.asarray(geoms, dtype=object)),
+        'centroids': centroids,
+    }
 
-    rpts = []
+def _draw_base(ax, base):
+    ax.add_collection(PatchCollection([_polygon_patch(g) for g in base['towns']],
+                                      facecolor='#1a1d20', edgecolor='#292e33', linewidth=0.35))
+    ax.add_collection(LineCollection(base['county_segments'], linewidth=0.8, color='#3e454b'))
+    ax.add_collection(LineCollection(base['nation_segments'], linewidth=1.2, color='#4a5260'))
+
+def _draw_dots(ax, base, reports, rd):
+    rmap = {}
     for r in reports:
-        rpts.append({**r,
+        r = {**r,
             '_cn':    norm(r.get('countyName')),
             '_tn':    r.get('townName') or '',
             '_count': r.get('reportCount') or 1,
-            '_lat':   r.get('lat'),
-            '_lon':   r.get('lon'),
-        })
-
-    rmap = {}
-    for r in rpts:
+        }
         key = f"{r['_cn']}|{r['_tn']}"
         if key == '|': continue
         if key not in rmap or town_rank(r) > town_rank(rmap[key]):
             rmap[key] = r
     dots = []
-
-    def draw_dot(cx, cy, r):
+    for key, r in sorted(rmap.items(), key=lambda kv: town_rank(kv[1])):
+        if key in base['centroids']:
+            cx, cy = base['centroids'][key]
+        elif r.get('lat') is not None and r.get('lon') is not None and r.get('cdi') is not None:
+            cx, cy = to_proj(r['lon'], r['lat'])
+        else:
+            continue
         rpx = rd(r_px(r['_count']))
         px, py = ax.transData.transform((cx, cy))
         dots.append((px, MAP_H - py, r_px(r['_count']) + 3.5))
@@ -265,12 +132,11 @@ def render_map(eq_no, epicenter=None, eq_type='unknown', output_path=None, disco
             ax.add_patch(Circle((cx, cy), rpx+rd(3.5),
                                 facecolor='none', edgecolor='#888888',
                                 linewidth=1.2, linestyle=(0,(4,2.5)), alpha=0.6, zorder=3))
-
         if r.get('allNotFelt') and not r.get('isDiscord'):
             ax.add_patch(Circle((cx, cy), rpx-rd(0.8),
                                 facecolor='none', edgecolor=NOT_FELT_STROKE,
                                 linewidth=1.6*PT, alpha=0.9, zorder=4))
-            return
+            continue
         col = GRADE_STYLE[grade_of(r)][0]
         if r.get('isDiscord'):
             sq_rpx = rpx * 0.85
@@ -282,32 +148,25 @@ def render_map(eq_no, epicenter=None, eq_type='unknown', output_path=None, disco
             ax.add_patch(Circle((cx, cy), rpx,
                                 facecolor=col, edgecolor=(1, 1, 1, 0.5),
                                 linewidth=0.7*PT, alpha=0.9, zorder=4))
+    return dots
 
-    for key, r in sorted(rmap.items(), key=lambda kv: town_rank(kv[1])):
-        if key in centroids:
-            cx, cy = centroids[key]
-        elif r['_lat'] is not None and r['_lon'] is not None and r.get('cdi') is not None:
-            cx, cy = to_proj(r['_lon'], r['_lat'])
-        else:
-            continue
-        draw_dot(cx, cy, r)
+def _draw_epicenter(ax, epicenter, rd):
+    if not (epicenter and epicenter.get('lat') and epicenter.get('lon')):
+        return None
+    ex, ey = to_proj(float(epicenter['lon']), float(epicenter['lat']))
+    epx, epy = ax.transData.transform((ex, ey))
+    sz = rd(11)
+    ax.add_patch(Circle((ex, ey), sz+rd(3),
+                        facecolor='none', edgecolor='#c0392b',
+                        linewidth=1.2, alpha=0.35, zorder=5))
+    ax.plot([ex-sz, ex+sz], [ey, ey],  color='#c0392b', lw=2.2,
+            solid_capstyle='round', zorder=5)
+    ax.plot([ex, ex],   [ey-sz, ey+sz], color='#c0392b', lw=2.2,
+            solid_capstyle='round', zorder=5)
+    ax.add_patch(Circle((ex, ey), rd(3), facecolor='#c0392b', zorder=6))
+    return (epx, MAP_H - epy)
 
-    epi_px = None
-    if epicenter and epicenter.get('lat') and epicenter.get('lon'):
-        ex, ey = to_proj(float(epicenter['lon']), float(epicenter['lat']))
-        epx, epy = ax.transData.transform((ex, ey))
-        epi_px = (epx, MAP_H - epy)
-        sz = rd(11)
-        ax.add_patch(Circle((ex, ey), sz+rd(3),
-                            facecolor='none', edgecolor='#c0392b',
-                            linewidth=1.2, alpha=0.35, zorder=5))
-        ax.plot([ex-sz, ex+sz], [ey, ey],  color='#c0392b', lw=2.2,
-                solid_capstyle='round', zorder=5)
-        ax.plot([ex, ex],   [ey-sz, ey+sz], color='#c0392b', lw=2.2,
-                solid_capstyle='round', zorder=5)
-        ax.add_patch(Circle((ex, ey), rd(3), facecolor='#c0392b', zorder=6))
-
-    # ── Header ──────────────────────────────────────────────
+def _draw_header(fig, eq_no, eq_type):
     hax = fig.add_axes([0, (MAP_H-48)/MAP_H, 1, 48/MAP_H])
     hax.set_facecolor('#08090b')
     hax.set_xlim(0, MAP_W); hax.set_ylim(0, 48); hax.axis('off')
@@ -324,7 +183,7 @@ def render_map(eq_no, epicenter=None, eq_type='unknown', output_path=None, disco
         tc = '#c0392b' if eq_type == 'significant' else '#484848'
         hax.text(MAP_W-14, 11, tl, color=tc, fontsize=9*PT, fontweight='bold', ha='right', va='bottom')
 
-    # ── Footer ──────────────────────────────────────────────
+def _draw_footer(fig):
     fax = fig.add_axes([0, 0, 1, 30/MAP_H])
     fax.set_facecolor('#08090b')
     fax.set_xlim(0, MAP_W); fax.set_ylim(0, 24); fax.axis('off')
@@ -332,7 +191,7 @@ def render_map(eq_no, epicenter=None, eq_type='unknown', output_path=None, disco
              '體感回報由公眾自願提供，僅供參考，不代表官方儀器數值 · twerg.org',
              color='#8c8c8c', fontsize=9*PT, ha='center', va='center')
 
-    # ── Legend ──────────────────────────────────────────────
+def _draw_legend(fig):
     leg = [(col, grade, label) for maxc, col, grade, label in CDI_MAP if maxc > 0.5]
     extras = ['沒感覺', '含待審查回報']
     iH  = 17; lW = 92; lH = (len(leg)+len(extras))*iH + 24
@@ -354,24 +213,114 @@ def render_map(eq_no, epicenter=None, eq_type='unknown', output_path=None, disco
         else:
             lax.add_patch(Circle((12, iy), 6, facecolor='none', edgecolor='#888888', linewidth=1*PT, linestyle=(0, (3, 2))))
         lax.text(23, iy, text, color=(1, 1, 1, 0.6), fontsize=8.5*PT, va='center')
+    return (lx, MAP_H-ly-lH, lx+lW, MAP_H-ly)
 
-    # ── Brand ───────────────────────────────────────────────
-    brand = draw_brand(fig)
+def _draw_brand(fig):
+    mark = logo(BRAND_LOGO_H - 8)
+    x0, bottom = 14, 38
+    tx = x0
+    if mark is not None:
+        lh, lw = mark.shape[0], mark.shape[1]
+        bw = max(BRAND_LOGO_H, lw + 8)
+        bax = fig.add_axes([x0/MAP_W, bottom/MAP_H, bw/MAP_W, BRAND_LOGO_H/MAP_H])
+        bax.set_xlim(0, bw); bax.set_ylim(BRAND_LOGO_H, 0); bax.axis('off')
+        bax.add_patch(FancyBboxPatch((0.5, 0.5), bw-1, BRAND_LOGO_H-1, boxstyle='round,pad=0,rounding_size=6',
+                                     facecolor='white', edgecolor='none'))
+        lx, ly = (bw - lw) / 2, (BRAND_LOGO_H - lh) / 2
+        bax.imshow(mark, extent=(lx, lx + lw, ly + lh, ly), interpolation='lanczos', zorder=2)
+        bax.set_xlim(0, bw); bax.set_ylim(BRAND_LOGO_H, 0)
+        tx = x0 + bw + 10
+    tax = fig.add_axes([tx/MAP_W, bottom/MAP_H, 120/MAP_W, BRAND_LOGO_H/MAP_H])
+    tax.set_xlim(0, 120); tax.set_ylim(0, BRAND_LOGO_H); tax.axis('off')
+    tax.text(0, BRAND_LOGO_H*0.70, '地牛記錄小組', color='#d0d0d0', fontsize=15*PT, fontweight='bold', va='center')
+    tax.text(0, BRAND_LOGO_H*0.22, '@taiwanerg',   color='#8c8c8c', fontsize=12*PT, fontweight='bold', va='center')
+    return (x0 - 4, MAP_H - bottom - BRAND_LOGO_H - 4, tx + 120, MAP_H - bottom + 4)
 
-    # ── Watermark ───────────────────────────────────────────
-    blocks = [(0, 0, MAP_W, 48), (0, MAP_H-30, MAP_W, MAP_H), (lx, MAP_H-ly-lH, lx+lW, MAP_H-ly)]
-    if brand is not None:
-        blocks.append(brand)
-    try:
-        place_watermark(fig, ax, nation, dots, blocks, epi_px)
-    except Exception as e:
-        logging.warning(f'⚠️ 體感地圖浮水印失敗: {e}')
+def _land_grid(ax, base, step):
+    def build():
+        inv = ax.transData.inverted()
+        gw, gh = MAP_W // step, MAP_H // step
+        grid = np.zeros((gh, gw), dtype=bool)
+        for gy in range(gh):
+            for gx in range(gw):
+                x, y = inv.transform(((gx + 0.5) * step, MAP_H - (gy + 0.5) * step))
+                grid[gy, gx] = base['nation'].contains(Point(x, y))
+        return grid
+    return cached(('dyfi_land_grid', step), build)
+
+def _draw_watermark(fig, ax, base, dots, blocks, epi_px):
+    wm = logo(WM_HEIGHT, alpha=0.24)
+    if wm is None:
+        return
+    h, w = wm.shape[0], wm.shape[1]
+    label_h = 24
+    bw, bh = max(w, 92), h + label_h
+    step = 10
+    grid = _land_grid(ax, base, step)
+
+    def score(cx, cy, box):
+        l, t, r, b = box
+        if epi_px is not None and math.hypot(cx - epi_px[0], cy - epi_px[1]) < WM_EPI_CLEAR:
+            return None
+        cells = grid[int((cy - bh / 2) // step):int((cy + bh / 2) // step) + 1,
+                     int((cx - bw / 2) // step):int((cx + bw / 2) // step) + 1]
+        land_share = cells.mean() if cells.size else 0.0
+        covered = sum(1 for px, py, pr in dots if l - pr < px < r + pr and t - pr < py < b + pr)
+        return (land_share >= 0.5, -covered, round(land_share * 10))
+
+    spot = pick_spot((bw, bh), (MAP_W, MAP_H), (6, 0), step, blocks, score)
+    if spot is None:
+        return
+    cx, cy = spot
+    top = cy - bh / 2
+    wax = fig.add_axes([0, 0, 1, 1], zorder=20)
+    wax.axis('off')
+    wax.imshow(wm, extent=(cx - w / 2, cx + w / 2, top + h, top), interpolation='lanczos')
+    wax.text(cx, top + h + label_h / 2, '@taiwanerg', color='white', alpha=0.3,
+             fontsize=13*PT, fontweight='bold', ha='center', va='center')
+    wax.set_xlim(0, MAP_W); wax.set_ylim(MAP_H, 0)
+
+def render_map(eq_no, epicenter=None, eq_type='unknown', output_path=None, discord_reports=None, town_cdi=None):
+    if town_cdi is None:
+        data     = fetch_json(f'{API_BASE}?eq_no={eq_no}')
+        town_cdi = merge_town_cdi(data.get('townCDI', []), discord_reports)
+    base = _basemap()
+    bnd = base['bounds']
+    dx, dy = bnd[2]-bnd[0], bnd[3]-bnd[1]
+    ppd   = min(AREA_W/dx, AREA_H/dy)
+    x_pad = (AREA_W/ppd - dx) / 2
+    y_pad = (AREA_H/ppd - dy) / 2
+
+    def rd(px): return px / ppd
 
     if output_path is None:
         output_path = f'dyfi_map_{eq_no}.png'
 
-    fig.savefig(output_path, dpi=DPI, facecolor='#0f1113')
-    plt.close(fig)
+    fig = plt.figure(figsize=(MAP_W/DPI, MAP_H/DPI), dpi=DPI)
+    try:
+        fig.patch.set_facecolor('#0f1113')
+        ax = fig.add_axes([18/MAP_W, 30/MAP_H, AREA_W/MAP_W, AREA_H/MAP_H])
+        ax.set_facecolor('#0f1113')
+        ax.axis('off')
+        _draw_base(ax, base)
+        ax.set_xlim(bnd[0]-x_pad, bnd[2]+x_pad)
+        ax.set_ylim(bnd[3]+y_pad, bnd[1]-y_pad)
+        ax.set_aspect('equal', adjustable='box')
+        ax.apply_aspect()
+
+        dots = _draw_dots(ax, base, town_cdi, rd)
+        epi_px = _draw_epicenter(ax, epicenter, rd)
+        _draw_header(fig, eq_no, eq_type)
+        _draw_footer(fig)
+        blocks = [HEADER_BLOCK, FOOTER_BLOCK, _draw_legend(fig), _draw_brand(fig)]
+        try:
+            _draw_watermark(fig, ax, base, dots, blocks, epi_px)
+        except Exception as e:
+            logging.warning(f'⚠️ 體感地圖浮水印失敗: {e}')
+
+        fig.savefig(output_path, dpi=DPI, facecolor='#0f1113')
+    finally:
+        plt.close(fig)
     return output_path
 
 if __name__ == '__main__':

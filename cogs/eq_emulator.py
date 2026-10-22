@@ -15,8 +15,7 @@ logger = logging.getLogger(__name__)
 
 # 這是一個非常簡易的地震模擬模組，由於我不熟悉這方面的算法，如果覺得有可以改進的地方請丟 PR 
 
-# 匯入 dyfi_map 的共用模組
-from module.dyfi_map import TOPO_LOCAL, load_topo
+from module.map_base import load_topo
 
 CDI_MAP = [
     (0.35, '#4b5563', '0',   '無感'),
