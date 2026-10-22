@@ -6,6 +6,7 @@ import ssl
 import threading
 import urllib.request
 
+import certifi
 import numpy as np
 from matplotlib import font_manager
 from PIL import Image
@@ -55,9 +56,7 @@ def load_topo():
         if os.path.isfile(TOPO_PATH):
             with open(TOPO_PATH, encoding="utf-8") as f:
                 return json.load(f)
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx = ssl.create_default_context(cafile=certifi.where())
         req = urllib.request.Request(TOPO_URL, headers={"User-Agent": "TWERG-Bot/1.0"})
         with urllib.request.urlopen(req, context=ctx) as r:
             return json.loads(r.read())

@@ -1,10 +1,9 @@
 import logging
 import json, math, urllib.request, ssl
+import certifi
 import matplotlib
 
-ssl_ctx = ssl.create_default_context()
-ssl_ctx.check_hostname = False
-ssl_ctx.verify_mode = ssl.CERT_NONE
+ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches

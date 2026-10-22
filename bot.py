@@ -2,16 +2,6 @@ import logging
 import ssl
 import certifi
 
-# 修復 Windows [ASN1: NOT_ENOUGH_DATA] ssl error
-orig_create_default_context = ssl.create_default_context
-
-def patched_create_default_context(purpose=ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None):
-    if cafile is None:
-        cafile = certifi.where()
-    return orig_create_default_context(purpose, cafile=cafile, capath=capath, cadata=cadata)
-
-ssl.create_default_context = patched_create_default_context
-
 import discord
 from discord.ext import commands
 import json
@@ -52,7 +42,13 @@ class MyBot(commands.Bot):
         self.session = None
 
     async def setup_hook(self):       
-        self.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
+        # 使用 certifi 信任庫兼容 Windows，同時保留 TLS 憑證與主機名驗證。
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        self.session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=ssl_context),
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
         # ================= 載入所有模組 (Cogs) =================
         # 自動載入 cogs/ 資料夾下的所有 .py 檔案
         for filename in os.listdir('./cogs'):
