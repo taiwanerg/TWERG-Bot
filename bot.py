@@ -2,12 +2,42 @@ import logging
 import ssl
 import certifi
 
-import discord
+# aiohttp 會在匯入階段建立預設 SSL context。Windows 憑證庫若含有
+# 損壞的憑證，會在 Bot 有機會套用 setup_hook 的 certifi context 前崩潰。
+# 因此僅在匯入 discord/aiohttp 時以 certifi 作為預設信任庫，之後立即
+# 恢復標準函式；TLS 憑證與主機名驗證仍會保留。
+_original_create_default_context = ssl.create_default_context
+
+
+def _create_certifi_context(
+    purpose=ssl.Purpose.SERVER_AUTH,
+    *,
+    cafile=None,
+    capath=None,
+    cadata=None,
+):
+    if cafile is None and capath is None and cadata is None:
+        cafile = certifi.where()
+
+    return _original_create_default_context(
+        purpose=purpose,
+        cafile=cafile,
+        capath=capath,
+        cadata=cadata,
+    )
+
+
+ssl.create_default_context = _create_certifi_context
+try:
+    import discord
+    import aiohttp
+finally:
+    ssl.create_default_context = _original_create_default_context
+
 from discord.ext import commands
 import json
 import sys
 import os
-import aiohttp
 from datetime import timezone, timedelta
 
 # ================= 讀取設定檔 =================
