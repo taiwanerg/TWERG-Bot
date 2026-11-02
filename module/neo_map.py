@@ -1,7 +1,8 @@
+import asyncio
 import io
 import math
 import random
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import matplotlib
 
@@ -12,7 +13,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import Circle, FancyBboxPatch, Polygon, Rectangle
 
 from module.map_base import logo, overlaps, pick_spot, register_fonts
-from module.neo_data import EARTH_KM, LD_KM, LEVELS, TAIPEI
+from module.neo_data import EARTH_KM, LD_KM, LEVELS, TAIPEI, diameter_range
 
 W, H, DPI = 1200, 1560, 100
 PX = 72 / DPI
@@ -38,6 +39,8 @@ FAMILY = ["Pretendard", "HarmonyOS Sans TC"]
 CJK = ["HarmonyOS Sans TC", "Pretendard"]
 WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 BAND_TEXT = {1: TEXT, 2: "#16130C", 3: TEXT, 4: TEXT}
+NEUTRAL = "#8FB3FF"
+RENDER_LOCK = asyncio.Lock()
 
 CONTINENTS = [
     [(-0.62, -0.38), (-0.30, -0.62), (0.02, -0.50), (-0.04, -0.18), (-0.30, -0.02), (-0.40, 0.30), (-0.62, 0.22), (-0.78, -0.08)],
@@ -91,6 +94,13 @@ class Canvas:
                          family=family or FAMILY, **kw)
         if block:
             self.blocks.append(self.bbox(t))
+        return t
+
+    def fit(self, x, y, s, size, max_w, **kw):
+        t = self.text(x, y, s, size, **kw)
+        l, _, r, _ = self.bbox(t)
+        if r - l > max_w:
+            t.set_fontsize(size * PX * max_w / (r - l))
         return t
 
     def bbox(self, t):
@@ -285,17 +295,21 @@ def _zoom(c, pts, i0, dist, color, box, seed):
     c.blocks.append((bx0, by0, bx1, by1))
 
 
-def render_flyby(approach, level, track=None, moon=None, output=None):
+def render_flyby(approach, level, track=None, moon=None, output=None, hours=48):
     seed = sum(map(ord, approach.des))
     c = Canvas(seed)
-    color = level_hex(level)
+    color = level_hex(level) if level else NEUTRAL
     lt = approach.local_time
     x0, y0, x1, y1 = 0, 548, W, FOOT_Y
     c.backdrop(((x0 + x1) / 2, (y0 + y1) / 2), top=BAND_H)
 
-    _band(c, color, BAND_TEXT[level], f"LEVEL {level}", LEVELS[level]["name"])
-    c.text(M, 280, approach.name, 104, weight="black")
-    c.text(M, 334, f"{lt:%m/%d %H:%M} 最接近地球", 30, color=TEXT_2, weight="medium", family=CJK)
+    if level:
+        _band(c, color, BAND_TEXT[level], f"LEVEL {level}", LEVELS[level]["name"])
+    else:
+        _band(c, TEXT, SPACE, "NEO", "近地天體查詢")
+    c.fit(M, 280, approach.name, 104, W - 2 * M, weight="black")
+    stamp = f"{lt:%m/%d %H:%M}" if lt.year == datetime.now(TAIPEI).year else f"{lt:%Y/%m/%d %H:%M}"
+    c.text(M, 334, f"{stamp} 最接近地球", 30, color=TEXT_2, weight="medium", family=CJK)
 
     dia_v, dia_u = fmt_dia(approach.dia_min, approach.dia_max)
     col = (W - 2 * M) / 3
@@ -307,7 +321,7 @@ def render_flyby(approach, level, track=None, moon=None, output=None):
     if track is not None and len(track.xyz) > 3:
         pts, i0, mpts = _project(track.xyz, moon.xyz if moon is not None else None)
     else:
-        (pts, i0), mpts = _straight(approach), None
+        (pts, i0), mpts = _straight(approach, hours), None
 
     dist = float(np.linalg.norm(pts[i0]))
     ch = y1 - y0
@@ -322,15 +336,27 @@ def render_flyby(approach, level, track=None, moon=None, output=None):
     ex, ey = to_px(0, 0)
     er = 50
 
-    for r_ld in (0.5, 2, 3, 4, 5, 6, 8):
+    show_moon = LD_KM * k >= er + 60
+    rings = (0.5, 2, 3, 4, 5, 6, 8) if show_moon else (5, 10, 20, 30, 40, 60, 80, 100)
+    for r_ld in rings:
         p = Circle((ex, ey), r_ld * LD_KM * k, fill=False, ec=HAIR_2, lw=1.2, zorder=2)
         c.ax.add_patch(p)
         p.set_clip_path(clip)
-    ring = Circle((ex, ey), LD_KM * k, fill=False, ec=TEXT_3, lw=1.6, ls=(0, (3, 5)), zorder=3)
-    c.ax.add_patch(ring)
-    ring.set_clip_path(clip)
+    if show_moon:
+        ring = Circle((ex, ey), LD_KM * k, fill=False, ec=TEXT_3, lw=1.6, ls=(0, (3, 5)), zorder=3)
+        c.ax.add_patch(ring)
+        ring.set_clip_path(clip)
+    else:
+        mpts = None
+        for r_ld in rings:
+            r = r_ld * LD_KM * k
+            lx, ly = ex - r * 0.707, ey + r * 0.707
+            if r > er + 90 and x0 + 150 < lx and ly < y1 - 60:
+                c.text(lx - 8, ly + 22, f"{r_ld} 倍月距", 18, color=TEXT_3, weight="bold", ha="right", family=CJK, block=True)
 
-    if mpts is not None:
+    if not show_moon:
+        mx = my = -1000.0
+    elif mpts is not None:
         mq = np.array([to_px(x, y) for x, y in mpts])
         ln, = c.ax.plot(mq[:, 0], mq[:, 1], color=TEXT_3, lw=2.0 * PX * 1.4, alpha=0.6, zorder=4, solid_capstyle="round")
         ln.set_clip_path(clip)
@@ -361,8 +387,9 @@ def render_flyby(approach, level, track=None, moon=None, output=None):
         c.ax.annotate("", xy=q[j], xytext=q[j - 3],
                       arrowprops=dict(arrowstyle="-|>,head_length=1.2,head_width=0.6", color=TEXT, lw=0, shrinkA=0, shrinkB=0), zorder=7)
 
-    per_hour = (len(q) - 1) / 96.0
-    for hh in (-36, -24, -12, 12, 24, 36):
+    per_hour = (len(q) - 1) / (2.0 * hours)
+    tick = 12 if hours <= 48 else max(24, int(round(hours / 4 / 24)) * 24)
+    for hh in [k * tick for k in (-3, -2, -1, 1, 2, 3)]:
         j = int(round(i0 + hh * per_hour))
         if 0 <= j < len(q) and x0 < q[j, 0] < x1 and y0 < q[j, 1] < y1:
             c.ax.add_patch(Circle(q[j], 4.5, fc=SPACE, ec=TEXT_2, lw=1.6, zorder=8))
@@ -384,7 +411,7 @@ def render_flyby(approach, level, track=None, moon=None, output=None):
     c.text(ax_ + 44, ay_ - 26, f"{lt:%H:%M} 最接近", 26, weight="bold", family=CJK, block=True)
     c.blocks.append((ax_ - 40, ay_ - 40, ax_ + 40, ay_ + 40))
 
-    c.text(x1 - M, y1 - 22, "天體大小為示意 · 圓點間隔 12 小時", 18, color=TEXT_3, ha="right", family=CJK, block=True)
+    c.text(x1 - M, y1 - 22, f"天體大小為示意 · 圓點間隔 {tick // 24} 天" if tick % 24 == 0 else f"天體大小為示意 · 圓點間隔 {tick} 小時", 18, color=TEXT_3, ha="right", family=CJK, block=True)
 
     if near:
         on_left = mx > W / 2
@@ -407,7 +434,7 @@ def _radius(ld, r_in, r_out, top=10.0):
     return r_in + (r_out - r_in) * math.log10(1 + min(ld, top)) / math.log10(1 + top)
 
 
-def render_weekly(approaches, start, output=None, highlight_ld=1.0):
+def render_weekly(approaches, start, output=None, highlight_ld=1.0, band=("WEEKLY", "近地天體週報"), subtitle="上週從 10 倍月距內飛過的小行星"):
     start = start.astimezone(TAIPEI)
     c = Canvas(int(start.timestamp()) // 86400)
     end = start + timedelta(days=7)
@@ -417,11 +444,11 @@ def render_weekly(approaches, start, output=None, highlight_ld=1.0):
     r_in, r_out = 78, 390
     c.backdrop((cx, cy), top=BAND_H)
 
-    _band(c, TEXT, SPACE, "WEEKLY", "近地天體週報")
+    _band(c, TEXT, SPACE, *band)
     c.text(M, 284, f"{start:%m.%d} — {last:%m.%d}", 92, weight="black")
-    c.text(M, 338, "上週從 10 倍月距內飛過的小行星", 28, color=TEXT_2, weight="medium", family=CJK)
-    t = c.text(W - M, 338, f"{len(items)}", 220, weight="black", ha="right")
-    c.text(c.bbox(t)[0] - 14, 338, "顆", 40, color=TEXT_2, weight="bold", ha="right", family=CJK)
+    c.text(M, 338, subtitle, 28, color=TEXT_2, weight="medium", family=CJK)
+    t = c.text(W - M, 338, "顆", 40, color=TEXT_2, weight="bold", ha="right", family=CJK)
+    c.text(c.bbox(t)[0] - 14, 338, f"{len(items)}", 220, weight="black", ha="right")
 
     for ld in (2, 5, 10):
         c.ax.add_patch(Circle((cx, cy), _radius(ld, r_in, r_out), fill=False, ec=HAIR, lw=1.4, zorder=2))
@@ -506,3 +533,129 @@ def render_weekly(approaches, start, output=None, highlight_ld=1.0):
     _watermark(c, (M, 380, W - M, 1370), score, height=160)
     _footer(c, "NASA / JPL CNEOS")
     return c.save(output)
+
+
+TORINO = [
+    (0, "#5B616C"), (1, "#3DBE6B"), (2, "#F2C230"), (3, "#F2C230"), (4, "#F2C230"), (5, "#F08A24"),
+    (6, "#F08A24"), (7, "#F08A24"), (8, "#E0352B"), (9, "#E0352B"), (10, "#E0352B"),
+]
+TORINO_GROUPS = [(0, 0, "無危險"), (1, 1, "正常"), (2, 4, "值得關注"), (5, 7, "具威脅"), (8, 10, "確定撞擊")]
+RATING_SCALE = [(0, "#5B616C"), (1, "#3DBE6B"), (2, "#F2C230"), (3, "#F08A24"), (4, "#E0352B")]
+RATING_GROUPS = [(0, 0, "可忽略"), (1, 1, "低"), (2, 2, "中低"), (3, 3, "中"), (4, 4, "偏高")]
+
+
+def _scale(c, y, title, scale, groups, current):
+    c.text(M, y, title, 24, color=TEXT_2, weight="bold", family=CJK)
+    top = y + 84
+    n = len(scale)
+    gap = 8
+    w = (W - 2 * M - gap * (n - 1)) / n
+    for i, (value, col) in enumerate(scale):
+        x = M + i * (w + gap)
+        on = value == current
+        h = 84 if on else 64
+        yy = top + (64 - h) / 2
+        c.ax.add_patch(FancyBboxPatch((x, yy), w, h, boxstyle="round,pad=0,rounding_size=10", fc=col, ec="white" if on else "none",
+                                      lw=3 if on else 0, alpha=1.0 if on else 0.3, zorder=20))
+        fg = SPACE if on and col not in ("#5B616C",) else TEXT
+        c.text(x + w / 2, top + 32, str(value), 34 if on else 26, color=fg, weight="black", ha="center", va="center",
+               alpha=1.0 if on else 0.6, zorder=21)
+        if on:
+            c.ax.add_patch(Polygon([(x + w / 2 - 12, yy - 26), (x + w / 2 + 12, yy - 26), (x + w / 2, yy - 10)], closed=True,
+                                   fc="white", ec="none", zorder=21))
+            c.text(x + w / 2, yy - 36, "目前", 22, weight="bold", ha="center", family=CJK)
+    for lo, hi, label in groups:
+        x0 = M + lo * (w + gap)
+        x1 = M + hi * (w + gap) + w
+        active = lo <= current <= hi
+        c.text((x0 + x1) / 2, top + 120, label, 21, color=TEXT if active else TEXT_3, weight="bold" if active else "medium",
+               ha="center", family=CJK)
+    return top + 140
+
+
+def render_risk(level, name, subtitle, stats, scale_kind, current, note, seed=0, output=None):
+    c = Canvas(seed)
+    color = level_hex(level)
+    c.backdrop((W / 2, 900), top=BAND_H)
+    _band(c, color, BAND_TEXT[level], f"LEVEL {level}", LEVELS[level]["name"])
+    c.fit(M, 280, name, 104, W - 2 * M, weight="black")
+    c.text(M, 334, subtitle, 30, color=TEXT_2, weight="medium", family=CJK)
+    col = (W - 2 * M) / 3
+    for i, (label, value, unit) in enumerate(stats[:3]):
+        _stat(c, M + i * col, label, value, unit)
+    c.hline(530)
+
+    if scale_kind == "torino":
+        bottom = _scale(c, 606, "杜林危險指數　TORINO SCALE", TORINO, TORINO_GROUPS, current)
+    else:
+        bottom = _scale(c, 606, "撞擊評等　IMPACT RATING", RATING_SCALE, RATING_GROUPS, current)
+
+    y0 = bottom + 10
+    z = c.fig.add_axes([0, 1 - FOOT_Y / H, 1, (FOOT_Y - y0) / H])
+    z.set_xlim(0, W)
+    z.set_ylim(FOOT_Y, y0)
+    z.axis("off")
+    er = 400
+    ex, ey = W * 0.34, FOOT_Y + 40
+    draw_earth(z, ex, ey, er, z=2)
+    rx, ry = W * 0.74, y0 + (FOOT_Y - y0) * 0.30
+    tail = np.array([[rx + 260 * t, ry - 150 * t] for t in np.linspace(0, 1, 40)])
+    segs = np.stack([tail[:-1], tail[1:]], axis=1)
+    rgb = matplotlib.colors.to_rgb(color)
+    lc = LineCollection(segs, colors=[(*rgb, a) for a in np.linspace(0.9, 0.0, len(segs))],
+                        linewidths=np.linspace(14, 2, len(segs)) * PX * 1.4, zorder=6, capstyle="round")
+    z.add_collection(lc)
+    for k, a in ((2.6, 0.10), (1.9, 0.18)):
+        z.add_patch(Circle((rx, ry), 34 * k, fc=color, ec="none", alpha=a, zorder=7))
+    draw_rock(z, rx, ry, 34, seed, z=8)
+    tx, ty = ex + er * 0.62, ey - er * 0.80
+    path = np.array([[rx + (tx - rx) * t, ry + (ty - ry) * t + 60 * t * (1 - t)] for t in np.linspace(0.16, 0.9, 30)])
+    z.plot(path[:, 0], path[:, 1], color=TEXT, lw=2.4 * PX * 1.4, ls=(0, (2, 4)), alpha=0.7, zorder=5)
+    z.text(rx, ry - 72, note, fontsize=30 * PX, color=color, fontweight="bold", ha="center", family=CJK, zorder=9)
+    z.text(W - M, FOOT_Y - 24, "示意圖，非實際軌道", fontsize=18 * PX, color=TEXT_2, ha="right", family=CJK, zorder=9)
+
+    horizon = ey - er
+    c.blocks.append((rx - 120, ry - 120, W, ry + 120))
+    _watermark(c, (M, y0, W - M, horizon - 10), lambda cx, cy, box: -cx, height=170)
+    _footer(c, "NASA / JPL CNEOS")
+    return c.save(output)
+
+
+def _odds(ip):
+    if ip <= 0:
+        return "—"
+    if ip >= 0.5:
+        return f"{ip * 100:.0f}%"
+    return f"1/{1 / ip:,.0f}"
+
+
+def _pct(ip):
+    p = ip * 100
+    if p >= 1:
+        return f"{p:.0f}%"
+    if p >= 0.01:
+        return f"{p:.2f}%"
+    return f"{p:.1e}%"
+
+
+def _size(km):
+    if km is None:
+        return "—", ""
+    return (f"~{km * 1000:,.0f}", "m") if km < 1 else (f"~{km:.1f}", "km")
+
+
+def render_sentry(r, level, output=None):
+    years = (r.years or "").split("-")
+    first, rest = (years[0], f"–{years[-1]}") if len(years) > 1 and years[0] != years[-1] else (years[0] or "—", "")
+    stats = [("撞擊機率", _odds(r.ip), ""), ("可能年份", first, rest), ("直徑", *_size(r.dia))]
+    return render_risk(level, r.name, "被 NASA 列入撞擊風險清單", stats, "torino", int(r.ts or 0),
+                       f"撞擊機率 {_pct(r.ip)}", sum(map(ord, r.des)), output)
+
+
+def render_scout(c, level, output=None):
+    lo, hi = diameter_range(c.h)
+    mid = (lo + hi) / 2 if lo is not None else None
+    labels = {0: "可忽略", 1: "低", 2: "中低", 3: "中", 4: "偏高"}
+    stats = [("撞擊評等", labels.get(c.rating, "—"), ""), ("直徑", *_size(mid)), ("觀測", str(c.n_obs), "次")]
+    return render_risk(level, c.name, "臨時編號，尚未確認", stats, "rating", int(c.rating or 0),
+                       "尚未確認", sum(map(ord, c.name)), output)

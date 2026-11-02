@@ -272,6 +272,62 @@ async def _vectors(session, command, start, end, step):
     return parse_vectors(payload.get("result", ""))
 
 
+@dataclass
+class Body:
+    des: str
+    name: str
+    neo: bool
+    pha: bool
+    h: float = None
+    dia: float = None
+
+
+SBDB_API = "https://ssd-api.jpl.nasa.gov/sbdb.api"
+
+
+def parse_sbdb(payload):
+    if payload.get("list"):
+        return [(item.get("pdes", ""), item.get("name", "")) for item in payload["list"]]
+    obj = payload.get("object")
+    if not obj:
+        return None
+    phys = {p.get("name"): _float(p.get("value")) for p in payload.get("phys_par") or []}
+    return Body(
+        des=obj.get("des", ""),
+        name=(obj.get("fullname") or obj.get("des", "")).strip(),
+        neo=bool(obj.get("neo")),
+        pha=bool(obj.get("pha")),
+        h=phys.get("H"),
+        dia=phys.get("diameter"),
+    )
+
+
+async def lookup(session, text):
+    async with session.get(SBDB_API, params={"sstr": text.strip(), "phys-par": "1"}, timeout=TIMEOUT) as r:
+        if r.status not in (200, 300):
+            r.raise_for_status()
+        return parse_sbdb(await r.json(content_type=None))
+
+
+async def approaches_of(session, des, start, end, dist_au=0.2):
+    payload = await _get_json(session, CAD_URL, {
+        "des": des,
+        "date-min": _utc_param(start),
+        "date-max": _utc_param(end),
+        "dist-max": f"{dist_au:g}",
+        "diameter": "true",
+        "fullname": "true",
+    })
+    return parse_cad(payload)
+
+
+def track_span(a):
+    hours = a.dist_km / max(a.v_rel, 1.0) / 3600 * 1.4
+    hours = min(max(hours, 48.0), 24 * 20.0)
+    step = max(20, int(hours * 60 / 144))
+    return hours, f"{step}m"
+
+
 async def flyby_tracks(session, a, hours=48, step="20m"):
     start = a.time - timedelta(hours=hours)
     end = a.time + timedelta(hours=hours)

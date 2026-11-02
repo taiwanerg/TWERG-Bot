@@ -5,6 +5,7 @@ import json
 import os
 
 from module.kma_backup import is_configured as kma_backup_configured
+from module.neo_settings import DEFAULTS as NEO_DEFAULTS, WEEKDAY_NAMES as NEO_WEEKDAYS
 
 # 定義儲存各伺服器設定的檔案路徑
 SETTINGS_FILE = 'guild_settings.json'
@@ -62,6 +63,13 @@ class SettingsOverviewView(discord.ui.View):
         embed.add_field(name="📢 公告頻道自動發布", value=auto_pub_status, inline=False)
         embed.add_field(name="📝 地震報告更新推送", value=revision_status, inline=False)
         embed.add_field(name="🇰🇷 韓國地震 (KMA)", value=kma_status, inline=False)
+        neo_parts = []
+        if self.settings.get("neo_alert_enabled"):
+            neo_parts.append("特別通知")
+        if self.settings.get("neo_weekly_enabled"):
+            neo_parts.append("週報")
+        neo_status = f"`🟢` 已啟用（{'、'.join(neo_parts)}）" if neo_parts else "`🔴` 已停用"
+        embed.add_field(name="☄️ 近地天體", value=neo_status, inline=False)
 
         return embed
 
@@ -75,7 +83,8 @@ class SettingsOverviewView(discord.ui.View):
             discord.SelectOption(label="Early-est 推送設定", value="earlyest", emoji="🌊", description="自動推送 Early-est 即時地震報告"),
             discord.SelectOption(label="公告自動發布設定", value="auto_pub", emoji="📢", description="自動發布公告頻道的訊息"),
             discord.SelectOption(label="地震報告更新推送", value="revision", emoji="📝", description="推送中央氣象署重新測定的地震資料"),
-            discord.SelectOption(label="韓國地震 (KMA) 推送", value="kma", emoji="🇰🇷", description="韓國氣象廳地震預警與地震報告")
+            discord.SelectOption(label="韓國地震 (KMA) 推送", value="kma", emoji="🇰🇷", description="韓國氣象廳地震預警與地震報告"),
+            discord.SelectOption(label="近地天體推送", value="neo", emoji="☄️", description="小行星飛掠、撞擊風險通知與每週週報")
         ],
         row=0
     )
@@ -97,6 +106,8 @@ class SettingsOverviewView(discord.ui.View):
             view = EarthquakeRevisionSettingsView(self.guild_id)
         elif val == "kma":
             view = KMASettingsView(self.guild_id)
+        elif val == "neo":
+            view = NEOSettingsView(self.guild_id)
 
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
@@ -1166,6 +1177,302 @@ class AutoPublishSettingsView(discord.ui.View):
             view=None
         )
         self.stop()
+
+NEO_PRESETS = {
+    "risk": ("只通知撞擊風險", "一年幾乎 0 則", [3, 4], 0.1),
+    "low": ("少：加上大型小行星飛掠", "一年約 1 則", [2, 3, 4], 0.1),
+    "std": ("標準：加上 3.8 萬 km 內的飛掠（推薦）", "一年約 11 則", [1, 2, 3, 4], 0.1),
+    "more": ("多：飛掠放寬到 9.6 萬 km 內", "一年約 30 則", [1, 2, 3, 4], 0.25),
+    "many": ("很多：月球距離內的飛掠都通知", "一年約 170 則", [1, 2, 3, 4], 1.0),
+}
+NEO_TAG_CHOICES = {
+    "4": ("只在可能即將撞擊時（推薦）", "幾乎不會發生，最不打擾"),
+    "3": ("有撞擊風險時", "NASA 評估有撞擊機率時也 tag"),
+    "1": ("每則通知都 tag", "包含一般的近距離飛掠"),
+}
+NEO_LEVEL_NOTE = "-# 通知圖上會標 LEVEL 1～4，數字越大越嚴重"
+NEO_FOOTER = "非官方預警，僅供科普參考"
+
+
+def _neo_settings(guild_id):
+    all_settings = load_settings()
+    settings = all_settings.setdefault(guild_id, {})
+    for name, value in NEO_DEFAULTS.items():
+        settings.setdefault(name, list(value) if isinstance(value, list) else value)
+    return all_settings, settings
+
+
+def _neo_channels(ids):
+    return " ".join(f"<#{c}>" for c in ids) if ids else "尚未選擇"
+
+
+def _channel_defaults(ids):
+    defaults = (_select_default(i, "channel") for i in ids if str(i).isdigit())
+    return [value for value in defaults if value is not None][:25]
+
+
+def _neo_state(enabled, channels):
+    if not enabled:
+        return "`🔴` 已關閉"
+    if not channels:
+        return "`⚠️` 還沒選頻道\n-# 已開啟，選好頻道才會發送"
+    return "`🟢` 開啟中"
+
+
+def _neo_preset(settings):
+    levels = sorted(int(x) for x in settings["neo_levels"])
+    close = float(settings["neo_close_ld"])
+    for key, (_, _, preset_levels, preset_ld) in NEO_PRESETS.items():
+        if levels == preset_levels and (1 not in levels or close == preset_ld):
+            return key
+    return None
+
+
+def _neo_amount(settings):
+    key = _neo_preset(settings)
+    if key is None:
+        levels = sorted(int(x) for x in settings["neo_levels"])
+        return "自訂", "、".join(f"LEVEL {x}" for x in levels) if levels else "全部關閉"
+    label, freq, _, _ = NEO_PRESETS[key]
+    return label.split("：")[0].replace("（推薦）", ""), freq
+
+
+def _neo_tag(settings):
+    roles = settings["neo_mention_role_ids"]
+    choice = NEO_TAG_CHOICES.get(str(settings["neo_mention_min_level"]))
+    if not roles or choice is None:
+        return "不 tag"
+    return f"{' '.join(f'<@&{r}>' for r in roles)}\n-# {choice[0].replace('（推薦）', '')}"
+
+
+def _paint_toggle(button, enabled):
+    button.label = "開啟中（按一下關閉）" if enabled else "已關閉（按一下開啟）"
+    button.emoji = "🟢" if enabled else "🔴"
+    button.style = discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary
+
+
+class NEOSettingsView(discord.ui.View):
+    def __init__(self, guild_id: int | str):
+        super().__init__(timeout=None)
+        self.guild_id = str(guild_id)
+        self.all_settings, self.settings = _neo_settings(self.guild_id)
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="`☄️` 近地天體",
+            description="小行星飛近地球、有撞擊風險時即時通知，另有每週一次的週報。\n-# 資料來自 NASA JPL CNEOS",
+            color=0x2D5BD3,
+        )
+        s = self.settings
+        name, freq = _neo_amount(s)
+        alert = f"{_neo_state(s['neo_alert_enabled'], s['neo_alert_channel_ids'])}\n{_neo_channels(s['neo_alert_channel_ids'])}\n-# {name} · {freq}"
+        day = NEO_WEEKDAYS[int(s["neo_weekly_day"])]
+        weekly = f"{_neo_state(s['neo_weekly_enabled'], s['neo_weekly_channel_ids'])}\n{_neo_channels(s['neo_weekly_channel_ids'])}\n-# 每{day} {int(s['neo_weekly_hour']):02d}:00"
+        embed.add_field(name="特別通知", value=alert, inline=True)
+        embed.add_field(name="週報", value=weekly, inline=True)
+        embed.set_footer(text=NEO_FOOTER)
+        return embed
+
+    @discord.ui.button(label="特別通知", emoji="☄️", style=discord.ButtonStyle.primary, row=0)
+    async def open_alert(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = NEOAlertSettingsView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="週報", emoji="🗓️", style=discord.ButtonStyle.primary, row=0)
+    async def open_weekly(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = NEOWeeklySettingsView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="返回概覽", style=discord.ButtonStyle.secondary, row=1)
+    async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = SettingsOverviewView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=1)
+    async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ **設定已儲存**", embed=self.build_embed(), view=None)
+        self.stop()
+
+
+class NEOAlertSettingsView(discord.ui.View):
+    def __init__(self, guild_id: int | str):
+        super().__init__(timeout=None)
+        self.guild_id = str(guild_id)
+        self.all_settings, self.settings = _neo_settings(self.guild_id)
+        self.select_channels.default_values = _channel_defaults(self.settings["neo_alert_channel_ids"])
+        self.select_roles.default_values = _role_defaults(self.settings["neo_mention_role_ids"])
+        self._paint()
+
+    def _paint(self):
+        _paint_toggle(self.toggle, self.settings["neo_alert_enabled"])
+        preset = _neo_preset(self.settings)
+        for opt in self.select_amount.options:
+            opt.default = opt.value == preset
+        has_roles = bool(self.settings["neo_mention_role_ids"])
+        self.select_tag.disabled = not has_roles
+        self.select_tag.placeholder = "什麼時候 tag" if has_roles else "先選身分組，才能設定什麼時候 tag"
+        for opt in self.select_tag.options:
+            opt.default = has_roles and opt.value == str(self.settings["neo_mention_min_level"])
+
+    def build_embed(self) -> discord.Embed:
+        s = self.settings
+        embed = discord.Embed(
+            title="`☄️` 特別通知",
+            description=f"小行星很靠近地球，或 NASA 評估有撞擊風險時，立即發送通知。\n{NEO_LEVEL_NOTE}",
+            color=0xE8552A,
+        )
+        name, freq = _neo_amount(s)
+        embed.add_field(name="狀態", value=_neo_state(s["neo_alert_enabled"], s["neo_alert_channel_ids"]), inline=True)
+        embed.add_field(name="頻道", value=_neo_channels(s["neo_alert_channel_ids"]), inline=True)
+        embed.add_field(name="通知多少", value=f"{name}\n-# {freq}", inline=True)
+        embed.add_field(name="🔔 tag", value=_neo_tag(s), inline=False)
+        embed.set_footer(text=KMA_MENTION_NOTE if s["neo_mention_role_ids"] else NEO_FOOTER)
+        return embed
+
+    async def _refresh(self, interaction: discord.Interaction):
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+        self._paint()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="已關閉（按一下開啟）", style=discord.ButtonStyle.secondary, row=0)
+    async def toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.settings["neo_alert_enabled"] = not self.settings["neo_alert_enabled"]
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="返回", style=discord.ButtonStyle.secondary, row=0)
+    async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = NEOSettingsView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=0)
+    async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ **設定已儲存**", embed=self.build_embed(), view=None)
+        self.stop()
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+        placeholder="選擇要發送的頻道（可多選）",
+        min_values=0,
+        max_values=25,
+        row=1,
+    )
+    async def select_channels(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.settings["neo_alert_channel_ids"] = [c.id for c in select.values]
+        select.default_values = _channel_defaults(self.settings["neo_alert_channel_ids"])
+        await self._refresh(interaction)
+
+    @discord.ui.select(
+        placeholder="選擇通知多少",
+        options=[discord.SelectOption(label=label, description=freq, value=key) for key, (label, freq, _, _) in NEO_PRESETS.items()],
+        row=2,
+    )
+    async def select_amount(self, interaction: discord.Interaction, select: discord.ui.Select):
+        _, _, levels, close = NEO_PRESETS[select.values[0]]
+        self.settings["neo_levels"] = list(levels)
+        self.settings["neo_close_ld"] = close
+        await self._refresh(interaction)
+
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="要 tag 的身分組（不選就不 tag）", min_values=0, max_values=10, row=3)
+    async def select_roles(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        self.settings["neo_mention_role_ids"] = [r.id for r in select.values]
+        select.default_values = _role_defaults(self.settings["neo_mention_role_ids"])
+        if str(self.settings["neo_mention_min_level"]) not in NEO_TAG_CHOICES:
+            self.settings["neo_mention_min_level"] = 4
+        await self._refresh(interaction)
+
+    @discord.ui.select(
+        placeholder="什麼時候 tag",
+        options=[discord.SelectOption(label=label, description=desc, value=key) for key, (label, desc) in NEO_TAG_CHOICES.items()],
+        row=4,
+    )
+    async def select_tag(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.settings["neo_mention_min_level"] = int(select.values[0])
+        await self._refresh(interaction)
+
+
+class NEOWeeklySettingsView(discord.ui.View):
+    def __init__(self, guild_id: int | str):
+        super().__init__(timeout=None)
+        self.guild_id = str(guild_id)
+        self.all_settings, self.settings = _neo_settings(self.guild_id)
+        self.select_channels.default_values = _channel_defaults(self.settings["neo_weekly_channel_ids"])
+        self._paint()
+
+    def _paint(self):
+        _paint_toggle(self.toggle, self.settings["neo_weekly_enabled"])
+        for opt in self.select_day.options:
+            opt.default = opt.value == str(self.settings["neo_weekly_day"])
+        for opt in self.select_hour.options:
+            opt.default = opt.value == str(self.settings["neo_weekly_hour"])
+
+    def build_embed(self) -> discord.Embed:
+        s = self.settings
+        day = NEO_WEEKDAYS[int(s["neo_weekly_day"])]
+        embed = discord.Embed(
+            title="`🗓️` 週報",
+            description="每週整理一次：上週有哪些小行星從地球附近飛過，以及本週預告。",
+            color=0xF2F0EA,
+        )
+        embed.add_field(name="狀態", value=_neo_state(s["neo_weekly_enabled"], s["neo_weekly_channel_ids"]), inline=True)
+        embed.add_field(name="頻道", value=_neo_channels(s["neo_weekly_channel_ids"]), inline=True)
+        embed.add_field(name="發送時間", value=f"每{day} {int(s['neo_weekly_hour']):02d}:00\n-# 台灣時間", inline=True)
+        embed.set_footer(text=NEO_FOOTER)
+        return embed
+
+    async def _refresh(self, interaction: discord.Interaction):
+        self.all_settings[self.guild_id] = self.settings
+        save_settings(self.all_settings)
+        self._paint()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="已關閉（按一下開啟）", style=discord.ButtonStyle.secondary, row=0)
+    async def toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.settings["neo_weekly_enabled"] = not self.settings["neo_weekly_enabled"]
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="返回", style=discord.ButtonStyle.secondary, row=0)
+    async def go_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = NEOSettingsView(self.guild_id)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    @discord.ui.button(label="完成設定", style=discord.ButtonStyle.success, row=0)
+    async def finish_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="✅ **設定已儲存**", embed=self.build_embed(), view=None)
+        self.stop()
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+        placeholder="選擇要發送的頻道（可多選）",
+        min_values=0,
+        max_values=25,
+        row=1,
+    )
+    async def select_channels(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        self.settings["neo_weekly_channel_ids"] = [c.id for c in select.values]
+        select.default_values = _channel_defaults(self.settings["neo_weekly_channel_ids"])
+        await self._refresh(interaction)
+
+    @discord.ui.select(
+        placeholder="選擇星期",
+        options=[discord.SelectOption(label=f"每{name}", value=str(i)) for i, name in enumerate(NEO_WEEKDAYS)],
+        row=2,
+    )
+    async def select_day(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.settings["neo_weekly_day"] = int(select.values[0])
+        await self._refresh(interaction)
+
+    @discord.ui.select(
+        placeholder="選擇時間（台灣時間）",
+        options=[discord.SelectOption(label=f"{h:02d}:00", value=str(h)) for h in range(24)],
+        row=3,
+    )
+    async def select_hour(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.settings["neo_weekly_hour"] = int(select.values[0])
+        await self._refresh(interaction)
+
 
 class SettingsCog(commands.Cog):
     def __init__(self, bot):
