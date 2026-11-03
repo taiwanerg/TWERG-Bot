@@ -19,11 +19,13 @@ class HelpView(discord.ui.View):
         embed_general.add_field(name="/intensity", value="🌍 透過輸入 PGA 和 PGV 大約換算各國地震震度", inline=False)
         embed_general.add_field(name="/invite", value="🔗 取得地牛記錄小組的 Discord 邀請網址", inline=False)
         embed_general.add_field(name="/kkw", value="💥 計算地震規模相等於多少顆原子彈的能量", inline=False)
+        embed_general.add_field(name="/neo 近期", value="☄️ 過去 7 天與未來 7 天從 10 倍月距內飛過地球的小行星", inline=False)
+        embed_general.add_field(name="/neo 查詢", value="🔭 用名稱或編號查詢小行星最接近地球的時間與距離", inline=False)
         embed_general.add_field(name="/rmt", value="📡 查詢近期 BATS RMT 地震報告", inline=False)
         embed_general.add_field(name="/yt", value="🖥️ 查詢 台灣地震監視 YouTube 直播觀看人數", inline=False)
         
         embed_admin = discord.Embed(title="管理員指令", color=0xff3846, description="需要管理員權限才能使用的指令")
-        embed_admin.add_field(name="/settings", value="⚙️ 顯示或修改機器人的設定\n-# 含 🇰🇷 韓國地震 (KMA)：預警／報告推送頻道、警報 tag 身分組、斷線通知", inline=False)
+        embed_admin.add_field(name="/settings", value="⚙️ 顯示或修改機器人的設定\n-# 含 🇰🇷 韓國地震 (KMA)：預警／報告推送頻道、警報 tag 身分組、斷線通知\n-# 含 ☄️ 近地天體：特別通知與週報的開關、頻道、通知多少、tag 身分組、週報時間", inline=False)
         embed_admin.add_field(name="/kma_status", value="🇰🇷 查看韓國氣象廳 (KMA) 預警／報告／測站連線狀態", inline=False)
         embed_admin.add_field(name="/sync_earthquake_reports", value="🔄 依 `/settings` 資料來源設定手動同步地震報告", inline=False)
         

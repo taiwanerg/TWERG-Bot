@@ -204,6 +204,11 @@ With `raise_on_drop=True`, permanent errors (missing permissions, etc.) re-raise
 | Report revision | `revision:{event}:{hash}:{channel}` | 2 h |
 | YouTube live monitor | `yt:{time}:{channel}` | 15 min |
 | Announcement auto-publish | `publish:{message}` | 10 min |
+| NEO flyby | `neo:cad:{des}:{yyyymmdd}:{level}:{channel}` | 6 h |
+| NEO impact risk (Sentry) | `neo:sentry:{des}:{torino}:{channel}` (kind `neo_risk`; the message ID is kept in `push_state_neo.json`) | 6 h |
+| NEO risk cleared | `neo:clear:{des}:{channel}` (reply to the risk message) | 6 h |
+| NEO unconfirmed candidate (Scout) | `neo:scout:{name}:{channel}` | 1 h |
+| NEO weekly digest | `neo:weekly:{yyyymmdd}:{channel}` | 6 h |
 
 Give new features their own prefix to avoid collisions.
 
