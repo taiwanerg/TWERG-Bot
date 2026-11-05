@@ -19,6 +19,8 @@ CAD_AHEAD_DAYS = 30
 CAD_MAX_LD = 5.0
 WEEKLY_LD = 10.0
 SENTRY_MIN_COUNT = 100
+SCOUT_MIN_COUNT = 10
+SCOUT_CONFIRM_RUNS = 2
 TTL = {"cad": 6 * 3600, "sentry": 6 * 3600, "scout": 3600, "weekly": 6 * 3600, "clear": 6 * 3600}
 
 
@@ -45,9 +47,11 @@ class NEOAlertCog(commands.Cog):
         self.state.setdefault("seen", {})
         self.state.setdefault("risks", {})
         self.state.setdefault("weekly", {})
+        self.state.setdefault("scout", {})
         self.last_slow = 0.0
         self.status = ConnectionStatusLogger("近地天體")
         self.box.on_sent("neo_risk", self.on_risk_sent)
+        self.box.on_sent("neo_scout", self.on_scout_sent)
         self.poll.start()
 
     def cog_unload(self):
@@ -62,6 +66,14 @@ class NEOAlertCog(commands.Cog):
 
     def on_risk_sent(self, key, meta, message):
         record = self.state["risks"].get(meta.get("des"))
+        if record is not None:
+            ref = [message.channel.id, message.id]
+            if ref not in record.setdefault("refs", []):
+                record["refs"].append(ref)
+            self.save()
+
+    def on_scout_sent(self, key, meta, message):
+        record = self.state["scout"].get(meta.get("name"))
         if record is not None:
             ref = [message.channel.id, message.id]
             if ref not in record.setdefault("refs", []):
@@ -105,7 +117,7 @@ class NEOAlertCog(commands.Cog):
         await self.box.send(
             key, target["channel_id"], content=content, embed=embed, files=files, allowed_mentions=allowed,
             reply_to=reply_to, mention_author=False if reply_to else None, ttl=TTL[kind],
-            kind="neo_risk" if kind == "sentry" else "neo", meta=meta or {},
+            kind={"sentry": "neo_risk", "scout": "neo_scout"}.get(kind, "neo"), meta=meta or {},
         )
 
     async def check_cad(self, session, all_settings, seeding):
@@ -174,10 +186,24 @@ class NEOAlertCog(commands.Cog):
 
     async def check_scout(self, session, all_settings, seeding):
         candidates = await neo_data.scout_list(session)
+        watch = self.state["scout"]
         images = {}
         for c in candidates:
             level = neo_data.candidate_level(c)
+            record = watch.get(c.name)
             if not level:
+                if record is not None and not record.get("refs"):
+                    watch.pop(c.name)
+                elif record is not None:
+                    record["hits"] = 0
+                    record["run"] = c.last_run
+                continue
+            if record is None:
+                record = watch[c.name] = {"run": c.last_run, "hits": SCOUT_CONFIRM_RUNS if seeding else 1, "refs": []}
+            elif record.get("run") != c.last_run:
+                record["run"] = c.last_run
+                record["hits"] = record.get("hits", 0) + 1
+            if record["hits"] < SCOUT_CONFIRM_RUNS:
                 continue
             for target in alert_targets(all_settings, level):
                 key = f"neo:scout:{c.name}:{target['channel_id']}"
@@ -189,8 +215,26 @@ class NEOAlertCog(commands.Cog):
                 if c.name not in images:
                     images[c.name] = await self.render(neo_map.render_scout, c, level)
                 filename = f"neo_scout_{c.name}.png"
-                await self.send("scout", key, target, neo_text.candidate_embed(c, level, filename), images[c.name], filename)
+                await self.send("scout", key, target, neo_text.candidate_embed(c, level, filename), images[c.name], filename,
+                                meta={"name": c.name})
                 logging.info(f"☄️ [近地天體] {c.name} 未確認撞擊候選已推送至 {target['channel_id']}")
+        if len(candidates) < SCOUT_MIN_COUNT:
+            return
+        current = {c.name: c for c in candidates}
+        for name in list(watch):
+            c = current.get(name)
+            if c is not None and (c.rating is None or c.rating > 0):
+                continue
+            record = watch.pop(name)
+            if seeding:
+                continue
+            for channel_id, message_id in record.get("refs", []):
+                await self.box.send(
+                    f"neo:scoutclear:{name}:{channel_id}", channel_id, embed=neo_text.candidate_cleared_embed(name, c is None),
+                    reply_to=(channel_id, message_id), mention_author=False, ttl=TTL["clear"], kind="neo",
+                )
+            if record.get("refs"):
+                logging.info(f"✅ [近地天體] {name} 未確認候選已排除或移出清單")
 
     async def check_weekly(self, session, all_settings):
         now_local = datetime.now(neo_data.TAIPEI)

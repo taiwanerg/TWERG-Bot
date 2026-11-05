@@ -26,6 +26,8 @@ LEVELS = {
     3: {"name": "撞擊風險上升", "en": "IMPACT RISK", "color": 0xE8552A},
     4: {"name": "可能即將撞擊", "en": "POSSIBLE IMPACT", "color": 0xC21A2B},
 }
+CANDIDATE_NAME = "未確認撞擊候選"
+SCOUT_MIN_OBS = 6
 
 
 @dataclass
@@ -144,9 +146,9 @@ def risk_level(r, ts_min=1):
     return 0
 
 
-def candidate_level(c, rating_min=3):
-    if c.rating is not None and c.rating >= rating_min:
-        return 4
+def candidate_level(c, rating_min=3, min_obs=SCOUT_MIN_OBS):
+    if c.rating is not None and c.rating >= rating_min and c.n_obs >= min_obs:
+        return 3
     return 0
 
 
