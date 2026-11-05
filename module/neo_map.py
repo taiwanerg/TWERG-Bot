@@ -13,7 +13,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import Circle, FancyBboxPatch, Polygon, Rectangle
 
 from module.map_base import logo, overlaps, pick_spot, register_fonts
-from module.neo_data import EARTH_KM, LD_KM, LEVELS, TAIPEI, diameter_range
+from module.neo_data import CANDIDATE_NAME, EARTH_KM, LD_KM, LEVELS, TAIPEI, diameter_range
 
 W, H, DPI = 1200, 1560, 100
 PX = 72 / DPI
@@ -573,11 +573,11 @@ def _scale(c, y, title, scale, groups, current):
     return top + 140
 
 
-def render_risk(level, name, subtitle, stats, scale_kind, current, note, seed=0, output=None):
+def render_risk(level, name, subtitle, stats, scale_kind, current, note, seed=0, output=None, band=None):
     c = Canvas(seed)
     color = level_hex(level)
     c.backdrop((W / 2, 900), top=BAND_H)
-    _band(c, color, BAND_TEXT[level], f"LEVEL {level}", LEVELS[level]["name"])
+    _band(c, color, BAND_TEXT[level], f"LEVEL {level}", band or LEVELS[level]["name"])
     c.fit(M, 280, name, 104, W - 2 * M, weight="black")
     c.text(M, 334, subtitle, 30, color=TEXT_2, weight="medium", family=CJK)
     col = (W - 2 * M) / 3
@@ -658,4 +658,4 @@ def render_scout(c, level, output=None):
     labels = {0: "可忽略", 1: "低", 2: "中低", 3: "中", 4: "偏高"}
     stats = [("撞擊評等", labels.get(c.rating, "—"), ""), ("直徑", *_size(mid)), ("觀測", str(c.n_obs), "次")]
     return render_risk(level, c.name, "臨時編號，尚未確認", stats, "rating", int(c.rating or 0),
-                       "尚未確認", sum(map(ord, c.name)), output)
+                       "尚未確認", sum(map(ord, c.name)), output, band=CANDIDATE_NAME)

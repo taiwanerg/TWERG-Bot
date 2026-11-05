@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import discord
 
-from module.neo_data import LEVELS, SBDB_PAGE, SCOUT_PAGE, TAIPEI, diameter_range
+from module.neo_data import CANDIDATE_NAME, LEVELS, SBDB_PAGE, SCOUT_PAGE, TAIPEI, diameter_range
 
 GEO_KM = 42164.0
 FOOTER = "資料來源 NASA JPL CNEOS｜非官方預警，僅供科普參考\nTaiwan Earthquake Recording Group · @taiwanerg"
@@ -28,8 +28,8 @@ def fmt_dia(lo, hi):
     return f"約 {lo:.1f}–{hi:.1f} km"
 
 
-def level_title(level):
-    return f"{LEVEL_EMOJI[level]} LEVEL {level}　{LEVELS[level]['name']}"
+def level_title(level, name=None):
+    return f"{LEVEL_EMOJI[level]} LEVEL {level}　{name or LEVELS[level]['name']}"
 
 
 def level_note(level, close_ld=0.1):
@@ -57,7 +57,7 @@ def advice(level, small=False):
             "請以 NASA、ESA 官方公告為準，不要轉傳未證實的消息。",
         ]
     return [
-        "此天體尚未確認，數據可能大幅變動，請勿恐慌。",
+        "請勿恐慌，撞擊時間與地點會隨新的觀測更新。",
         "小型天體多半在高空燒毀，可能看到火流星或聽到音爆。",
         "看到強烈閃光後請遠離窗戶，避免玻璃碎裂受傷。",
         "請依政府災防告警與官方公告行動。",
@@ -119,17 +119,39 @@ def risk_cleared_embed(name):
     return embed
 
 
+CANDIDATE_NOTE = "剛被發現、軌道還沒確定的天體，NASA 暫時無法排除撞擊。這類天體多數在幾小時到幾天內就會被新的觀測排除。"
+CANDIDATE_ADVICE = [
+    "目前不需要任何行動，請勿恐慌或轉傳。",
+    "臨時編號在一般資料庫查不到是正常的，點標題可看 NASA Scout 頁面。",
+    "後續排除或移出清單時，會回覆這則訊息。",
+]
+
+
 def candidate_embed(c, level, filename=None):
     lo, hi = diameter_range(c.h)
-    embed = _embed(level, level_title(level), f"☄️ **{c.name}**（臨時編號，尚未確認）被評估有撞擊地球的可能",
+    embed = _embed(level, level_title(level, CANDIDATE_NAME),
+                   f"☄️ **{c.name}**（臨時編號）剛被發現，NASA 目前還無法排除撞擊地球的可能",
                    SCOUT_PAGE.format(c.name))
     embed.add_field(name="🎯 撞擊評等", value=f"{RATING.get(c.rating, '未知')}（{c.rating}/4）", inline=True)
     embed.add_field(name="📐 直徑", value=fmt_dia(lo, hi), inline=True)
     embed.add_field(name="🔭 觀測次數", value=f"{c.n_obs} 次", inline=True)
-    embed.add_field(name="📊 等級說明", value=level_note(level), inline=False)
-    embed.add_field(name="✅ 建議行動", value=_bullets(advice(level)), inline=False)
+    embed.add_field(name="📊 等級說明", value=CANDIDATE_NOTE, inline=False)
+    embed.add_field(name="✅ 建議行動", value=_bullets(CANDIDATE_ADVICE), inline=False)
     if filename:
         embed.set_image(url=f"attachment://{filename}")
+    return embed
+
+
+def candidate_cleared_embed(name, gone):
+    if gone:
+        title = "✅ 已移出 NASA 未確認天體清單"
+        text = (f"**{name}** 已不在 NASA Scout 清單上，通常代表軌道已確定並取得正式編號。"
+                "如果仍有撞擊風險，NASA 會改列入撞擊風險清單，屆時會另外通知。")
+    else:
+        title = "✅ 後續觀測已排除撞擊可能"
+        text = f"**{name}** 有了新的觀測後，NASA 的撞擊評等已降為 0（可忽略）。"
+    embed = discord.Embed(title=title, description=text, color=0x3BA55C, url=None if gone else SCOUT_PAGE.format(name))
+    embed.set_footer(text=FOOTER)
     return embed
 
 

@@ -207,7 +207,8 @@ With `raise_on_drop=True`, permanent errors (missing permissions, etc.) re-raise
 | NEO flyby | `neo:cad:{des}:{yyyymmdd}:{level}:{channel}` | 6 h |
 | NEO impact risk (Sentry) | `neo:sentry:{des}:{torino}:{channel}` (kind `neo_risk`; the message ID is kept in `push_state_neo.json`) | 6 h |
 | NEO risk cleared | `neo:clear:{des}:{channel}` (reply to the risk message) | 6 h |
-| NEO unconfirmed candidate (Scout) | `neo:scout:{name}:{channel}` | 1 h |
+| NEO unconfirmed candidate (Scout) | `neo:scout:{name}:{channel}` (kind `neo_scout`; the message ID is kept in `push_state_neo.json`) | 1 h |
+| NEO candidate cleared | `neo:scoutclear:{name}:{channel}` (reply to the candidate message) | 6 h |
 | NEO weekly digest | `neo:weekly:{yyyymmdd}:{channel}` | 6 h |
 
 Give new features their own prefix to avoid collisions.
