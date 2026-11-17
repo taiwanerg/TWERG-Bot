@@ -326,7 +326,7 @@ def _city_lines(cities, origin, now, limit=8):
             status = "도달 · 已抵達"
         else:
             arrive = int(origin.timestamp() + city["seconds"])
-            status = f"<t:{arrive}:R>"
+            status = f"약 <t:{arrive}:R> 도달"
         lines.append(f"{LEVEL_EMOJI.get(city['level'], '▫️')} **{city['ko']}** {city['zh']}　{roman(city['level'])}　{status}")
     return lines
 
@@ -347,7 +347,7 @@ def build_message(event, mode_key, filename, analysis):
     mag = event.get("magnitude")
     depth = event.get("depth")
     mag_text = f"M{mag:.1f}" if mag is not None else "-"
-    depth_text = f"{depth:.0f}km" if depth and mode_key == "지진정보" else "-"
+    depth_text = f"{depth:.0f}km" if isinstance(depth, (int, float)) and depth > 0 else "-"
     level_ko = "최대진도" if mode_key == "지진정보" else "최대 예상진도"
     level_zh = "最大震度" if mode_key == "지진정보" else "最大預估震度"
     desc = []
