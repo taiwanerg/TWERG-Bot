@@ -1,11 +1,12 @@
 import json
 import os
+import re
 import threading
 
 from shapely.geometry import Point, shape
 from shapely.prepared import prep
 
-from module.kma_intensity import RegionEstimator, clamp_level, point_level, s_wave_seconds
+from module.kma_intensity import EEW_DEPTH_KM, RegionEstimator, clamp_level, point_level, s_wave_seconds
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASEMAP_PATH = os.path.join(BASE_DIR, "maps", "korea_basemap.json")
@@ -96,15 +97,34 @@ def sido_short(name):
     return SIDO_SHORT.get(name, (name, name))
 
 
-def station_region_levels(points):
+def region_code(lat, lon):
     regions, _ = _regions()
+    p = Point(lon, lat)
+    for region in regions:
+        if region["prepared"].contains(p):
+            return region["code"]
+    return None
+
+
+def locate_place(lat, lon):
+    if lat is None or lon is None:
+        return ""
+    code = region_code(lat, lon)
+    if code is None:
+        return ""
+    regions, _ = _regions()
+    region = next(r for r in regions if r["code"] == code)
+    sido = sido_short(region["sido"])[0]
+    name = re.sub(r"^(.+?시)(.+구)$", r"\1 \2", region["name"])
+    return f"{sido} {name}"
+
+
+def station_region_levels(points):
     levels = {}
     for lat, lon, level in points:
-        p = Point(lon, lat)
-        for region in regions:
-            if region["prepared"].contains(p):
-                levels[region["code"]] = max(levels.get(region["code"], 0), level)
-                break
+        code = region_code(lat, lon)
+        if code is not None:
+            levels[code] = max(levels.get(code, 0), level)
     return levels
 
 
@@ -131,20 +151,24 @@ def analyze(event, mode_key, stations=None):
     _, estimator = _regions()
     lat, lon = event.get("lat"), event.get("lon")
     mag = event.get("magnitude")
-    depth = event.get("depth") or 10.0
+    depth = event.get("depth") or EEW_DEPTH_KM
     max_level = event.get("max_level") or None
     observed = [s for s in (stations or []) if s[2] >= 1]
-    levels, offset, source = {}, 0.0, "none"
+    levels, source = {}, "none"
     if mode_key == "지진정보" and observed:
         levels = station_region_levels(observed)
         source = "observed"
     elif lat is not None and lon is not None and isinstance(mag, (int, float)):
-        levels, offset = estimator.estimate(mag, depth, lat, lon, max_level=max_level)
+        levels = estimator.estimate(mag, lat, lon, max_level=max_level)
         source = "estimated"
     cities = []
     if lat is not None and lon is not None and isinstance(mag, (int, float)):
         for ko, zh, clat, clon in CITIES:
-            level = point_level(mag, depth, lat, lon, clat, clon, offset, max_level)
+            code = region_code(clat, clon)
+            if source == "estimated" and code in levels:
+                level = levels[code]
+            else:
+                level = point_level(mag, lat, lon, clat, clon, max_level)
             cities.append({
                 "ko": ko, "zh": zh, "level": level,
                 "seconds": s_wave_seconds(depth, lat, lon, clat, clon),
@@ -154,7 +178,6 @@ def analyze(event, mode_key, stations=None):
         "levels": levels,
         "observed": observed,
         "source": source,
-        "offset": offset,
         "regions": summarize(levels),
         "cities": cities,
         "max_level": clamp_level(max_level or 0),

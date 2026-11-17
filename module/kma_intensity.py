@@ -50,10 +50,10 @@ _ROMAN_LOOKUP = {
     "I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10, "XI": 10, "XII": 10,
 }
 
-_AW_CEUS = (11.72, 2.36, 0.1155, -0.44, -0.002044, 2.31, -0.479, 14.0)
-_AW_CA = (12.27, 2.270, 0.1304, -1.30, -0.0007070, 1.95, -0.577, 14.0)
-
-OFFSET_DECAY_KM = 60.0
+KMA_IPE = (2.4, 1.4, 3.0, 30.0)
+EEW_DEPTH_KM = 8.0
+NEAR_FIELD_KM = 30.0
+PEAK_BAND = 0.1
 
 LEVEL_EMOJI = {
     0: "▫️", 1: "⬜", 2: "🟦", 3: "🟩", 4: "🟨", 5: "🟧", 6: "🟥", 7: "🟪", 8: "🟫", 9: "🟫", 10: "⬛",
@@ -98,20 +98,16 @@ def epicentral_distance_km(lat1, lon1, lat2, lon2):
     return 6371.0 * 2 * math.asin(min(1.0, math.sqrt(a)))
 
 
-def _atkinson_wald(coeffs, magnitude, depth_km, distance_km):
-    c1, c2, c3, c4, c5, c6, c7, h = coeffs
-    hypo = math.hypot(distance_km, max(depth_km or 0.0, 0.0))
-    r = math.hypot(hypo, h)
-    log_r = math.log10(r)
-    b = max(0.0, math.log10(r / 50.0))
-    m = magnitude - 6.0
-    return c1 + c2 * m + c3 * m * m + c4 * log_r + c5 * r + c6 * b + c7 * magnitude * log_r
+def predict_mmi(magnitude, distance_km):
+    a, b, c, h = KMA_IPE
+    return a + b * magnitude - c * math.log10(math.hypot(distance_km, h))
 
 
-def predict_mmi(magnitude, depth_km, distance_km):
-    ceus = _atkinson_wald(_AW_CEUS, magnitude, depth_km, distance_km)
-    ca = _atkinson_wald(_AW_CA, magnitude, depth_km, distance_km)
-    return (ceus + ca) / 2.0
+def capped_level(magnitude, distance_km, max_level=None):
+    level = level_from_mmi(predict_mmi(magnitude, distance_km))
+    if max_level:
+        level = min(level, clamp_level(max_level))
+    return level
 
 
 class RegionEstimator:
@@ -135,33 +131,37 @@ class RegionEstimator:
             result.append((code, sido, name, dist))
         return result
 
-    def estimate(self, magnitude, depth_km, lat, lon, max_level=None, max_offset=1.0, min_level=2):
-        distances = {code: dist for code, _, _, dist in self.closest_distances(lat, lon)}
-        raw = {code: predict_mmi(magnitude, depth_km, dist) for code, dist in distances.items()}
-        offset = 0.0
-        if max_level and raw:
-            peak_code = max(raw, key=raw.get)
-            nearest = distances[peak_code]
-            offset = (float(max_level) - raw[peak_code]) / math.exp(-nearest / OFFSET_DECAY_KM)
-            offset = max(-max_offset, min(max_offset, offset))
+    def estimate(self, magnitude, lat, lon, max_level=None, min_level=2):
+        raw = {code: predict_mmi(magnitude, dist) for code, _, _, dist in self.closest_distances(lat, lon)}
         levels = {}
         for code, value in raw.items():
-            level = level_from_mmi(value + offset * math.exp(-distances[code] / OFFSET_DECAY_KM))
+            level = level_from_mmi(value)
             if max_level:
                 level = min(level, clamp_level(max_level))
-            levels[code] = level if level >= min_level else 0
-        return levels, offset
+            levels[code] = level
+        if max_level and raw and max(levels.values()) < clamp_level(max_level):
+            top = max(raw.values())
+            for code, value in raw.items():
+                if value >= top - PEAK_BAND:
+                    levels[code] = clamp_level(max_level)
+        return {code: level if level >= min_level else 0 for code, level in levels.items()}
 
 
-def point_level(magnitude, depth_km, lat, lon, plat, plon, offset=0.0, max_level=None):
+def point_level(magnitude, lat, lon, plat, plon, max_level=None):
+    return capped_level(magnitude, epicentral_distance_km(lat, lon, plat, plon), max_level)
+
+
+def plausible_level(level, magnitude, lat, lon, plat, plon, tolerance=1):
     dist = epicentral_distance_km(lat, lon, plat, plon)
-    value = predict_mmi(magnitude, depth_km, dist) + offset * math.exp(-dist / OFFSET_DECAY_KM)
-    level = level_from_mmi(value)
-    if max_level:
-        level = min(level, clamp_level(max_level))
-    return level
+    if dist <= NEAR_FIELD_KM:
+        return True
+    return level <= capped_level(magnitude, dist) + tolerance
 
 
 def s_wave_seconds(depth_km, lat, lon, plat, plon, velocity=3.5):
     dist = epicentral_distance_km(lat, lon, plat, plon)
     return math.hypot(dist, max(depth_km or 0.0, 0.0)) / velocity
+
+
+def p_wave_seconds(depth_km, lat, lon, plat, plon, velocity=6.0):
+    return s_wave_seconds(depth_km, lat, lon, plat, plon, velocity)

@@ -246,7 +246,7 @@ def _draw_info(c, event, mode_key, analysis):
     max_w = tile_x - 36 - loc_x
     c.vline(loc_x - 22, TILE_TOP + 24, TILE_TOP + TILE - 16, color=HAIR, lw=1.6)
 
-    line1, line2 = _split_place(event.get("place_ko"))
+    line1, line2 = _split_place(kma_text.s2t(event.get("place_ko")))
     c.fit(loc_x, 236, line1, 46, max_w, color=INK, weight="black")
     if line2:
         c.fit(loc_x, 286, line2, 32, max_w, color=INK_2, weight="bold")
@@ -267,7 +267,7 @@ def _draw_info(c, event, mode_key, analysis):
     shaking = sum(1 for v in analysis["levels"].values() if v >= 2)
     cells = [
         ("발생 시각", kma_text.kst_text(origin)[5:] + " KST" if origin else "-"),
-        ("깊이", f"{depth:.0f} km" if isinstance(depth, (int, float)) else "-"),
+        ("깊이", f"{depth:.0f} km" if mode_key == "지진정보" and isinstance(depth, (int, float)) and depth > 0 else "-"),
         ("진도 Ⅱ 이상 시군구", f"{shaking}곳" if analysis["source"] != "none" else "-"),
         fourth,
     ]
@@ -318,27 +318,84 @@ def _draw_legend(c, box, peak, source):
             c.text(x + 8, ry + sw_h / 2, "▶", 13, color=INK, weight="black", va="center_baseline", z=23)
 
 
-def _draw_watermark(c, epi_px, legend):
-    wm = _load_logo(TWERG_LOGO_PATH, height=300, gray_alpha=0.12)
-    if wm is None:
+WM_TEXT = "@taiwanerg"
+WM_SIZES = (44, 40, 36, 32)
+WM_ALPHA = 0.32
+WM_PAD = 10
+WM_LAND_SHARE = 0.7
+WM_EPI_CLEAR = 200
+WM_STEP = 4
+WM_Z = 5
+
+
+def _hex_rgb(value):
+    return np.array([int(value[i:i + 2], 16) for i in (1, 3, 5)], dtype=np.float32)
+
+
+def _map_layers(c, legend):
+    c.fig.canvas.draw()
+    rgb = np.asarray(c.fig.canvas.buffer_rgba())[..., :3].astype(np.float32)
+    outside = np.zeros(rgb.shape[:2], dtype=bool)
+    for a, b in ((SEA, GRID), (SEA, COAST), (NEIGHBOR, COAST), (SEA, NEIGHBOR)):
+        a, b = _hex_rgb(a), _hex_rgb(b)
+        span = b - a
+        t = np.clip(((rgb - a) @ span) / float(span @ span), 0.0, 1.0)
+        outside |= np.abs(rgb - (a + t[..., None] * span)).max(axis=2) <= 6
+    rank = np.zeros(rgb.shape[:2], dtype=np.int8)
+    for level in range(2, 11):
+        rank[np.abs(rgb - _hex_rgb(LEVEL_COLORS[level])).max(axis=2) <= 6] = level
+    usable = np.zeros(rgb.shape[:2], dtype=bool)
+    usable[MAP_TOP + 8:MAP_BOTTOM - 8, MAP_LEFT + 8:MAP_RIGHT - 8] = True
+    lx, ly, lw, lh = legend
+    usable[int(ly) - 12:int(ly + lh) + 12, int(lx) - 12:int(lx + lw) + 12] = False
+    return ~outside, rank, usable
+
+
+def _box_sum(mask, bw, bh):
+    total = np.pad(mask.astype(np.int32), ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+    return total[bh:, bw:] - total[:-bh, bw:] - total[bh:, :-bw] + total[:-bh, :-bw]
+
+
+def _to_lonlat(extent):
+    min_lon, max_lon, min_lat, max_lat = extent
+
+    def convert(x, y):
+        lon = min_lon + (x - MAP_LEFT) / (MAP_RIGHT - MAP_LEFT) * (max_lon - min_lon)
+        lat = min_lat + (MAP_BOTTOM - y) / (MAP_BOTTOM - MAP_TOP) * (max_lat - min_lat)
+        return lon, lat
+    return convert
+
+
+def _draw_watermark(c, ax, extent, epi_px, legend):
+    land, rank, usable = _map_layers(c, legend)
+    convert = _to_lonlat(extent)
+    for size in WM_SIZES:
+        probe = c.text(0, 0, WM_TEXT, size, weight="bold", alpha=0)
+        box = probe.get_window_extent(renderer=c.renderer)
+        probe.remove()
+        bw, bh = int(box.width + WM_PAD * 2), int(box.height + WM_PAD * 2)
+        area = float(bw * bh)
+        fits = _box_sum(~usable, bw, bh) == 0
+        share = _box_sum(land, bw, bh) / area
+        peak = np.zeros(share.shape, dtype=np.int8)
+        for level in range(2, 11):
+            peak[_box_sum(rank >= level, bw, bh) > 0] = level
+        ys, xs = np.nonzero(fits & (share >= WM_LAND_SHARE))
+        keep = (ys % WM_STEP == 0) & (xs % WM_STEP == 0)
+        ys, xs = ys[keep], xs[keep]
+        cx, cy = xs + bw / 2, ys + bh / 2
+        if epi_px is not None:
+            far = np.hypot(cx - epi_px[0], cy - epi_px[1]) >= WM_EPI_CLEAR
+            ys, xs, cx, cy = ys[far], xs[far], cx[far], cy[far]
+        if xs.size == 0:
+            continue
+        key = -peak[ys, xs].astype(np.int32) * 100 + np.round(share[ys, xs] * 10).astype(np.int32)
+        best = np.flatnonzero(key == key.max())
+        pick = int(random.SystemRandom().choice(best))
+        lon, lat = convert(float(cx[pick]), float(cy[pick]))
+        ax.text(lon, lat, WM_TEXT, fontsize=size * PX, color=INK, alpha=WM_ALPHA, weight="bold", family=FAMILY,
+                ha="center", va="center", zorder=WM_Z, clip_on=True)
         return
-    h, w = wm.shape[0], wm.shape[1]
-    block_h = h + 56
-    candidates = []
-    for cx in range(int(MAP_LEFT + w / 2 + 30), int(MAP_RIGHT - w / 2 - 30), 24):
-        for cy in range(int(MAP_TOP + block_h / 2 + 30), int(MAP_BOTTOM - block_h / 2 - 30), 24):
-            if epi_px is not None and math.hypot(cx - epi_px[0], cy - epi_px[1]) < 300:
-                continue
-            lx, ly, lw, lh = legend
-            if lx - w / 2 - 20 < cx < lx + lw + w / 2 + 20 and ly - block_h / 2 - 20 < cy < ly + lh + block_h / 2 + 20:
-                continue
-            candidates.append((cx, cy))
-    if not candidates:
-        return
-    cx, cy = random.SystemRandom().choice(candidates)
-    top = cy - block_h / 2
-    c.ui.imshow(wm, extent=(cx - w / 2, cx + w / 2, top + h, top), zorder=15, interpolation="lanczos")
-    c.text(cx, top + h + 40, "@taiwanerg", 30, color=INK, weight="bold", ha="center", alpha=0.15, z=15)
 
 
 def _draw_map(fig, c, event, mode_key, analysis, paths):
@@ -403,7 +460,7 @@ def _draw_map(fig, c, event, mode_key, analysis, paths):
 
     c.text(MAP_RIGHT - 12, MAP_BOTTOM - 12, paths["attribution"], 11, color=INK_3, weight="medium", ha="right", z=12,
            effects=[patheffects.withStroke(linewidth=3 * PX, foreground=SEA)])
-    return epi_px
+    return epi_px, ax, extent
 
 
 def _draw_footer(c, analysis):
@@ -447,10 +504,10 @@ def render_kma_map(event, mode_key="지진정보", stations=None, analysis=None,
     try:
         _draw_band(c, event, mode_key)
         _draw_info(c, event, mode_key, analysis)
-        epi_px = _draw_map(fig, c, event, mode_key, analysis, paths)
+        epi_px, ax, extent = _draw_map(fig, c, event, mode_key, analysis, paths)
         legend = _legend_box(epi_px)
         _draw_legend(c, legend, event.get("max_level") or 0, analysis["source"])
-        _draw_watermark(c, epi_px, legend)
+        _draw_watermark(c, ax, extent, epi_px, legend)
         _draw_footer(c, analysis)
         buf = output if output is not None else io.BytesIO()
         fig.savefig(buf, dpi=DPI, facecolor=PAPER, format="png")
