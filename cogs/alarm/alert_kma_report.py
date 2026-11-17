@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import numpy as np
 from discord.ext import commands
 
-from module import kma_backup, kma_push, kma_text
+from module import kma_backup, kma_official, kma_push, kma_text
 from module.kma_intensity import EEW_DEPTH_KM, clamp_level, epicentral_distance_km, p_wave_seconds, plausible_level
 from module.kma_ws import KMAStream
 
@@ -18,6 +18,8 @@ WINDOW_BEFORE = 10
 WINDOW_AFTER = 150
 BASELINE_SECONDS = 60
 NEIGHBOR_KM = 50
+OFFICIAL_POLL_SECONDS = 60
+OFFICIAL_WAIT_SECONDS = 20 * 60
 
 
 class KMAReportAlertCog(commands.Cog):
@@ -34,11 +36,44 @@ class KMAReportAlertCog(commands.Cog):
         self.station_stream.start()
         self.backup = kma_backup.get_stream(bot)
         self.backup.register("report", self.on_backup)
+        self.latest = {}
+        self.followers = {}
 
     def cog_unload(self):
         asyncio.create_task(self.stream.stop())
         asyncio.create_task(self.station_stream.stop())
         self.backup.unregister("report")
+        for task in self.followers.values():
+            task.cancel()
+
+    def follow_official(self, key):
+        task = self.followers.get(key)
+        if task is None or task.done():
+            self.followers[key] = asyncio.create_task(self._follow_official(key))
+
+    async def _follow_official(self, key):
+        deadline = time.time() + OFFICIAL_WAIT_SECONDS
+        while time.time() < deadline:
+            await asyncio.sleep(OFFICIAL_POLL_SECONDS)
+            record, event = self.state.get(key), self.latest.get(key)
+            if record is None or event is None or record.get("official"):
+                return
+            if not record.get("messages"):
+                continue
+            official = await kma_official.fetch_official(self.bot.session, event)
+            if not official:
+                continue
+            async with self.lock:
+                if record.get("official"):
+                    return
+                analysis, png = await kma_push.prepare(event, "지진정보", None, official)
+                filename = f"kma_report_{int(event['origin'].timestamp())}_{int(time.time())}.png"
+                content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
+                await kma_push.edit_messages(self.bot, record["messages"], content, embed, png, filename, kind="report", event=event)
+                record["official"] = True
+                kma_push.save_state("report", self.state)
+                logging.info(f"🔄 [KMA 報告] {key} 已換成官方計測震度，編輯 {len(record['messages'])} 則訊息")
+            return
 
     async def on_station(self, payload):
         if payload.get("type") == "kma_stations_update":
@@ -168,11 +203,16 @@ class KMAReportAlertCog(commands.Cog):
                 kma_push.save_state("report", self.state)
                 return
             stations = await self.wait_observed(event)
-            analysis, png = await kma_push.prepare(event, "지진정보", stations)
+            official = await kma_official.fetch_official(self.bot.session, event)
+            analysis, png = await kma_push.prepare(event, "지진정보", stations, official)
             filename = f"kma_report_{int(origin.timestamp())}.png"
             content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
             record["messages"] = await kma_push.send_to_channels(self.bot, channels, content, embed, png, filename, kind="report", record_key=key)
+            record["official"] = bool(official)
+            self.latest[key] = event
             kma_push.save_state("report", self.state)
+            if not official:
+                self.follow_official(key)
             logging.info(f"🚨 [KMA 報告] {key} M{event.get('magnitude')} 已發送至 {len(record['messages'])} 個頻道")
             return
 
@@ -193,11 +233,19 @@ class KMAReportAlertCog(commands.Cog):
         edit = changed and bool(record.get("messages"))
         if not edit and not new_channels:
             return
-        if new_channels and not record.get("messages"):
+        self.latest[key] = event
+        official = await kma_official.fetch_official(self.bot.session, event)
+        if official:
+            stations = None
+        elif new_channels and not record.get("messages"):
             stations = await self.wait_observed(event)
         else:
             stations = self.observed_levels(event)
-        analysis, png = await kma_push.prepare(event, "지진정보", stations)
+        analysis, png = await kma_push.prepare(event, "지진정보", stations, official)
+        if official:
+            record["official"] = True
+        elif not record.get("official"):
+            self.follow_official(key)
         filename = f"kma_report_{int(origin.timestamp())}_{int(time.time())}.png"
         content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
         if edit:

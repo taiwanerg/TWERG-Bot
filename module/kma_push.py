@@ -269,12 +269,12 @@ def normalize_backup_report(doc):
     return event
 
 
-async def prepare(event, mode_key, stations=None):
+async def prepare(event, mode_key, stations=None, official=None):
     from module.kma_analysis import analyze
     from module.kma_map import render_kma_map
 
     async with _render_lock:
-        analysis = await asyncio.to_thread(analyze, event, mode_key, stations)
+        analysis = await asyncio.to_thread(analyze, event, mode_key, stations, official)
         buf = await asyncio.to_thread(render_kma_map, event, mode_key, None, analysis)
     return analysis, buf.getvalue()
 
@@ -378,14 +378,18 @@ def build_message(event, mode_key, filename, analysis):
 
     region_lines = _region_lines(analysis.get("regions") or [])
     if region_lines:
-        if analysis.get("source") == "observed":
+        if analysis.get("source") == "official":
+            name = "📡 관측 진도 지역 · 官方計測震度地區"
+        elif analysis.get("source") == "observed":
             name = "📡 관측 진도 지역 · 測站觀測震度地區"
         else:
             name = "🗺️ 예상 진도 지역 · 預估震度地區"
         embed.add_field(name=name, value=_clip(region_lines), inline=False)
 
     embed.set_image(url=f"attachment://{filename}")
-    if analysis.get("source") == "observed":
+    if analysis.get("source") == "official":
+        note = "관측진도: 기상청 시군구별 최대 계기진도"
+    elif analysis.get("source") == "observed":
         note = "관측진도: 기상청 실시간 관측소"
     elif mode_key == "지진정보":
         note = "진도 분포는 TWERG 추정 · 預估僅供參考"
