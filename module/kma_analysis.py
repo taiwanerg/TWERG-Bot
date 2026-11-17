@@ -147,7 +147,7 @@ def summarize(levels):
     return result
 
 
-def analyze(event, mode_key, stations=None):
+def analyze(event, mode_key, stations=None, official=None):
     _, estimator = _regions()
     lat, lon = event.get("lat"), event.get("lon")
     mag = event.get("magnitude")
@@ -155,7 +155,11 @@ def analyze(event, mode_key, stations=None):
     max_level = event.get("max_level") or None
     observed = [s for s in (stations or []) if s[2] >= 1]
     levels, source = {}, "none"
-    if mode_key == "지진정보" and observed:
+    if mode_key == "지진정보" and official:
+        levels = {code: level for code, level in official.items() if level >= 2}
+        observed = []
+        source = "official"
+    elif mode_key == "지진정보" and observed:
         levels = station_region_levels(observed)
         source = "observed"
     elif lat is not None and lon is not None and isinstance(mag, (int, float)):

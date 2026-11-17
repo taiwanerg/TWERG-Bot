@@ -305,7 +305,7 @@ def _legend_box(epi_px):
 def _draw_legend(c, box, peak, source):
     x, y, w, h = box
     c.rect(x, y, w, h, PAPER, edge=HAIR, lw=1.2, z=20, radius=10)
-    title = "관측진도" if source == "observed" else "예상진도"
+    title = "관측진도" if source in ("observed", "official") else "예상진도"
     c.text(x + w / 2, y + 32, title, 16, color=INK, weight="bold", ha="center", z=21)
     row_h, sw_w, sw_h = 30, w - 40, 24
     top = y + 48
@@ -425,7 +425,7 @@ def _draw_map(fig, c, event, mode_key, analysis, paths):
 
     for path in paths["neighbors"]:
         ax.add_patch(PathPatch(path, facecolor=NEIGHBOR, edgecolor=COAST, linewidth=0.7 * PX, zorder=2))
-    levels = analysis["levels"] if analysis["source"] == "estimated" else {}
+    levels = analysis["levels"] if analysis["source"] in ("estimated", "official") else {}
     for code, path in paths["municipalities"]:
         if path is None:
             continue
@@ -471,7 +471,9 @@ def _draw_footer(c, analysis):
         c.image(kma, x, FOOT_MID - kma.shape[0] / 2)
         x += kma.shape[1] + 14
     c.text(x, FOOT_MID - 4, "자료  기상청 Korea Meteorological Administration", 18, color=INK, weight="bold")
-    if analysis["source"] == "observed":
+    if analysis["source"] == "official":
+        note = "관측진도: 기상청 발표 시군구별 최대 계기진도"
+    elif analysis["source"] == "observed":
         note = "관측진도: 기상청 실시간 관측소 최댓값"
     elif analysis["source"] == "estimated":
         note = "지도의 진도 분포는 TWERG 자체 추정이며 공식 발표가 아닙니다"
