@@ -318,27 +318,74 @@ def _draw_legend(c, box, peak, source):
             c.text(x + 8, ry + sw_h / 2, "▶", 13, color=INK, weight="black", va="center_baseline", z=23)
 
 
+WM_HEIGHTS = (240, 210, 180, 150, 120)
+WM_PAD = 12
+WM_EPI_GAP = 90
+WM_NEAR_SLACK = 36
+WM_SHRINK_COST = 2.0
+
+
+def _hex_rgb(value):
+    return np.array([int(value[i:i + 2], 16) for i in (1, 3, 5)], dtype=np.int16)
+
+
+def _open_sea(c):
+    c.fig.canvas.draw()
+    rgb = np.asarray(c.fig.canvas.buffer_rgba())[..., :3].astype(np.float32)
+    free = np.zeros(rgb.shape[:2], dtype=bool)
+    for a, b in ((SEA, GRID), (SEA, COAST), (NEIGHBOR, COAST), (SEA, NEIGHBOR)):
+        a, b = _hex_rgb(a).astype(np.float32), _hex_rgb(b).astype(np.float32)
+        span = b - a
+        t = np.clip(((rgb - a) @ span) / float(span @ span), 0.0, 1.0)
+        free |= np.abs(rgb - (a + t[..., None] * span)).max(axis=2) <= 6
+    inside = np.zeros_like(free)
+    inside[MAP_TOP + 4:MAP_BOTTOM - 4, MAP_LEFT + 4:MAP_RIGHT - 4] = True
+    return free & inside
+
+
+def _sea_slots(free, bw, bh):
+    blocked = np.pad((~free).astype(np.int32), ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+    hits = blocked[bh:, bw:] - blocked[:-bh, bw:] - blocked[bh:, :-bw] + blocked[:-bh, :-bw]
+    ys, xs = np.nonzero(hits == 0)
+    return xs + bw / 2, ys + bh / 2
+
+
 def _draw_watermark(c, epi_px, legend):
-    wm = _load_logo(TWERG_LOGO_PATH, height=300, gray_alpha=0.12)
-    if wm is None:
+    free = _open_sea(c)
+    focus = epi_px or ((MAP_LEFT + MAP_RIGHT) / 2, (MAP_TOP + MAP_BOTTOM) / 2)
+    options = []
+    for height in WM_HEIGHTS:
+        wm = _load_logo(TWERG_LOGO_PATH, height=height, gray_alpha=0.12)
+        if wm is None:
+            return
+        h, w = wm.shape[0], wm.shape[1]
+        size = max(18, 30 * height / 300)
+        probe = c.text(0, 0, "@taiwanerg", size, weight="bold", alpha=0)
+        tw, th = c.width(probe), probe.get_window_extent(renderer=c.renderer).height
+        probe.remove()
+        gap = height * 0.08
+        bw = int(max(w, tw) + WM_PAD * 2)
+        bh = int(h + gap + th + WM_PAD * 2)
+        cx, cy = _sea_slots(free, bw, bh)
+        if cx.size == 0:
+            continue
+        dist = np.hypot(cx - focus[0], cy - focus[1])
+        reach = math.hypot(bw, bh) / 2 + WM_EPI_GAP
+        keep = dist >= reach if epi_px is not None else np.ones_like(dist, dtype=bool)
+        if not keep.any():
+            continue
+        cost = dist[keep] + (WM_HEIGHTS[0] - height) * WM_SHRINK_COST
+        for x, y, k in zip(cx[keep], cy[keep], cost):
+            options.append((float(k), float(x), float(y), wm, gap, size, bh))
+    if not options:
         return
+    best = min(o[0] for o in options)
+    near = [o for o in options if o[0] <= best + WM_NEAR_SLACK]
+    _, x, y, wm, gap, size, bh = random.SystemRandom().choice(near)
     h, w = wm.shape[0], wm.shape[1]
-    block_h = h + 56
-    candidates = []
-    for cx in range(int(MAP_LEFT + w / 2 + 30), int(MAP_RIGHT - w / 2 - 30), 24):
-        for cy in range(int(MAP_TOP + block_h / 2 + 30), int(MAP_BOTTOM - block_h / 2 - 30), 24):
-            if epi_px is not None and math.hypot(cx - epi_px[0], cy - epi_px[1]) < 300:
-                continue
-            lx, ly, lw, lh = legend
-            if lx - w / 2 - 20 < cx < lx + lw + w / 2 + 20 and ly - block_h / 2 - 20 < cy < ly + lh + block_h / 2 + 20:
-                continue
-            candidates.append((cx, cy))
-    if not candidates:
-        return
-    cx, cy = random.SystemRandom().choice(candidates)
-    top = cy - block_h / 2
-    c.ui.imshow(wm, extent=(cx - w / 2, cx + w / 2, top + h, top), zorder=15, interpolation="lanczos")
-    c.text(cx, top + h + 40, "@taiwanerg", 30, color=INK, weight="bold", ha="center", alpha=0.15, z=15)
+    top = y - bh / 2 + WM_PAD
+    c.ui.imshow(wm, extent=(x - w / 2, x + w / 2, top + h, top), zorder=15, interpolation="lanczos")
+    c.text(x, top + h + gap, "@taiwanerg", size, color=INK, weight="bold", ha="center", va="top", alpha=0.15, z=15)
 
 
 def _draw_map(fig, c, event, mode_key, analysis, paths):
