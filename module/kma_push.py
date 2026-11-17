@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 
 import discord
 
@@ -135,6 +136,25 @@ def signature_changed(old, new):
         if a is not None and b is not None and abs(a - b) > 0.05:
             return True
     return False
+
+
+EVENT_TIMES = ("origin", "issued")
+
+
+def event_to_state(event):
+    data = {k: v for k, v in event.items() if k not in EVENT_TIMES}
+    for k in EVENT_TIMES:
+        value = event.get(k)
+        data[k] = value.timestamp() if value is not None else None
+    return data
+
+
+def event_from_state(data):
+    event = {k: v for k, v in (data or {}).items() if k not in EVENT_TIMES}
+    for k in EVENT_TIMES:
+        value = (data or {}).get(k)
+        event[k] = datetime.fromtimestamp(value, timezone.utc) if isinstance(value, (int, float)) else None
+    return event
 
 
 def has_backup(record):

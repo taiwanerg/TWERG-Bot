@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from module import kma_official
 from module.kma_backup import display_host as backup_host
 from module.kma_backup import is_configured as backup_configured
 from module.kma_backup import load_url as load_backup_url
@@ -310,8 +311,23 @@ class KMACog(commands.Cog):
                 guild_on = _load_settings().get(str(interaction.guild_id), {}).get("kma_backup_enabled")
                 detail += f"\n本伺服器：{'`🟢` 已開啟' if guild_on else '`🔴` 未開啟'}"
             embed.add_field(name="🛡️ 備援伺服器", value=detail, inline=False)
+        embed.add_field(name="📡 官方計測震度頁", value=_official_status(), inline=False)
         embed.timestamp = datetime.now()
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+def _official_status():
+    status = kma_official.STATUS
+    lines = []
+    if status["last_success"]:
+        lines.append(f"`🟢` 最近成功讀取 <t:{int(status['last_success'])}:R>")
+        lines.append(f"-# 頁面 i_3_{status['last_stamp']}")
+    else:
+        lines.append("尚未讀取過（重開後要等下一場地震報告）")
+    if status["problem"]:
+        lines.append(f"`⚠️` {status['problem']}")
+        lines.append(f"-# <t:{int(status['problem_at'])}:R>")
+    return "\n".join(lines)
 
 
 async def setup(bot):
