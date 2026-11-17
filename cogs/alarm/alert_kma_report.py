@@ -8,10 +8,11 @@ import numpy as np
 from discord.ext import commands
 
 from module import kma_backup, kma_push, kma_text
-from module.kma_intensity import clamp_level, epicentral_distance_km
+from module.kma_intensity import EEW_DEPTH_KM, clamp_level, epicentral_distance_km, p_wave_seconds, plausible_level
 from module.kma_ws import KMAStream
 
 FRESH_SECONDS = 3 * 3600
+P_SLACK_SECONDS = 3
 STATION_BUFFER_SECONDS = 15 * 60
 WINDOW_BEFORE = 10
 WINDOW_AFTER = 150
@@ -57,18 +58,27 @@ class KMAReportAlertCog(commands.Cog):
         while self.station_frames and epoch - self.station_frames[0][0] > STATION_BUFFER_SECONDS:
             self.station_frames.popleft()
 
-    def observed_levels(self, origin_epoch, max_level):
-        if not self.stations or not self.station_frames:
+    def observed_levels(self, event):
+        origin = event.get("origin")
+        if origin is None or not self.stations or not self.station_frames:
             return None
+        origin_epoch = origin.timestamp()
+        max_level = event.get("max_level")
+        lat, lon, mag = event.get("lat"), event.get("lon"), event.get("magnitude")
+        located = lat is not None and lon is not None and isinstance(mag, (int, float))
+        depth = event.get("depth") or EEW_DEPTH_KM
         frames = list(self.station_frames)
         if frames[0][0] > origin_epoch - WINDOW_BEFORE or frames[-1][0] < origin_epoch + WINDOW_AFTER - 5:
             return None
         pre = np.array([m for t, m in frames if origin_epoch - WINDOW_BEFORE - BASELINE_SECONDS <= t < origin_epoch - WINDOW_BEFORE], dtype=float)
-        win = np.array([m for t, m in frames if origin_epoch - WINDOW_BEFORE <= t <= origin_epoch + WINDOW_AFTER], dtype=float)
-        if win.size == 0:
+        inside = [(t, m) for t, m in frames if origin_epoch - WINDOW_BEFORE <= t <= origin_epoch + WINDOW_AFTER]
+        if not inside:
             return None
+        times = np.array([t for t, _ in inside], dtype=float)
+        win = np.array([m for _, m in inside], dtype=float)
         baseline = np.median(pre, axis=0) if pre.size else np.full(win.shape[1], -2.0)
         peak = win.max(axis=0)
+        peak_at = times[win.argmax(axis=0)]
         rise = peak - baseline
         candidates = [i for i in range(len(peak)) if peak[i] >= 2 and rise[i] >= 1]
         responsive = [i for i in range(len(peak)) if peak[i] >= 1 and rise[i] >= 1]
@@ -82,6 +92,11 @@ class KMAReportAlertCog(commands.Cog):
             if not support:
                 continue
             level = clamp_level(int(peak[i]))
+            if located:
+                if peak_at[i] < origin_epoch + p_wave_seconds(depth, lat, lon, lat_i, lon_i) - P_SLACK_SECONDS:
+                    continue
+                if not plausible_level(level, mag, lat, lon, lat_i, lon_i):
+                    continue
             if max_level:
                 level = min(level, max_level)
             result.append((lat_i, lon_i, level))
@@ -152,7 +167,7 @@ class KMAReportAlertCog(commands.Cog):
             if not channels:
                 kma_push.save_state("report", self.state)
                 return
-            stations = await self.wait_observed(origin, event.get("max_level"))
+            stations = await self.wait_observed(event)
             analysis, png = await kma_push.prepare(event, "지진정보", stations)
             filename = f"kma_report_{int(origin.timestamp())}.png"
             content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
@@ -179,9 +194,9 @@ class KMAReportAlertCog(commands.Cog):
         if not edit and not new_channels:
             return
         if new_channels and not record.get("messages"):
-            stations = await self.wait_observed(origin, event.get("max_level"))
+            stations = await self.wait_observed(event)
         else:
-            stations = self.observed_levels(origin.timestamp(), event.get("max_level"))
+            stations = self.observed_levels(event)
         analysis, png = await kma_push.prepare(event, "지진정보", stations)
         filename = f"kma_report_{int(origin.timestamp())}_{int(time.time())}.png"
         content, embed = kma_push.build_message(event, "지진정보", filename, analysis)
@@ -197,13 +212,14 @@ class KMAReportAlertCog(commands.Cog):
             logging.info(f"🚨 [KMA 報告] {key} 由 {source} 補發至 {len(refs)} 個頻道")
         kma_push.save_state("report", self.state)
 
-    async def wait_observed(self, origin, max_level):
+    async def wait_observed(self, event):
+        origin = event.get("origin")
         if origin is None:
             return None
         remaining = origin.timestamp() + WINDOW_AFTER + 3 - time.time()
         if 0 < remaining <= WINDOW_AFTER + 3:
             await asyncio.sleep(remaining)
-        return self.observed_levels(origin.timestamp(), max_level)
+        return self.observed_levels(event)
 
 
 async def setup(bot):

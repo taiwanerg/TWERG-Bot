@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 
 import discord
@@ -175,6 +176,17 @@ def _num(value):
         return None
 
 
+HANGUL = re.compile(r"[가-힣]")
+
+
+def resolve_place(place_ko, place_zh_raw, lat, lon):
+    ko = kma_text.s2t(place_ko or "").strip()
+    if not HANGUL.search(ko):
+        from module.kma_analysis import locate_place
+        ko = locate_place(lat, lon) or "위치 미상"
+    return ko, kma_text.place_zh(ko, place_zh_raw)
+
+
 def normalize_eew(data):
     origin, issued = kma_text.eew_origin_time(data.get("shockTime"), data.get("createTime"))
     mode = data.get("infoTypeName") or ("지진조기경보" if data.get("isWarn") else "지진속보")
@@ -184,15 +196,17 @@ def normalize_eew(data):
     area = data.get("maxIntensityArea") or []
     if isinstance(area, str):
         area = [area]
+    lat, lon = _num(data.get("latitude")), _num(data.get("longitude"))
+    place_ko, place_zh = resolve_place(data.get("placeName"), data.get("placename_zh"), lat, lon)
     return {
         "id": str(data.get("id")),
         "mode": mode,
         "magnitude": _num(data.get("magnitude")),
         "depth": _num(data.get("depth")),
-        "lat": _num(data.get("latitude")),
-        "lon": _num(data.get("longitude")),
-        "place_ko": data.get("placeName") or "",
-        "place_zh": kma_text.place_zh(data.get("placeName"), data.get("placename_zh")),
+        "lat": lat,
+        "lon": lon,
+        "place_ko": place_ko,
+        "place_zh": place_zh,
         "origin": origin,
         "issued": issued,
         "max_level": level,
@@ -204,15 +218,17 @@ def normalize_report(data):
     origin = kma_text.parse_time(data.get("shockTime"))
     updated = kma_text.parse_time(data.get("updateTime")) or origin
     level = parse_level(data.get("intensity")) or parse_level(data.get("maxIntensity"))
+    lat, lon = _num(data.get("latitude")), _num(data.get("longitude"))
+    place_ko, place_zh = resolve_place(data.get("placeName"), data.get("placename_zh"), lat, lon)
     return {
         "id": str(data.get("id")),
         "mode": "지진정보",
         "magnitude": _num(data.get("magnitude")),
         "depth": _num(data.get("depth")),
-        "lat": _num(data.get("latitude")),
-        "lon": _num(data.get("longitude")),
-        "place_ko": data.get("placeName") or "",
-        "place_zh": kma_text.place_zh(data.get("placeName"), data.get("placename_zh")),
+        "lat": lat,
+        "lon": lon,
+        "place_ko": place_ko,
+        "place_zh": place_zh,
         "origin": origin,
         "issued": updated,
         "max_level": level,
@@ -221,16 +237,17 @@ def normalize_report(data):
 
 
 def _backup_base(doc):
-    place = doc.get("location") or ""
     level = _num(doc.get("maxIntensityScale"))
+    lat, lon = _num(doc.get("latitude")), _num(doc.get("longitude"))
+    place_ko, place_zh = resolve_place(doc.get("location"), None, lat, lon)
     return {
         "id": str(doc.get("id")),
         "magnitude": _num(doc.get("magnitude")),
         "depth": _num(doc.get("depthKm")),
-        "lat": _num(doc.get("latitude")),
-        "lon": _num(doc.get("longitude")),
-        "place_ko": place,
-        "place_zh": kma_text.place_zh(place),
+        "lat": lat,
+        "lon": lon,
+        "place_ko": place_ko,
+        "place_zh": place_zh,
         "origin": kma_text.parse_iso(doc.get("occurredAt")),
         "issued": kma_text.parse_iso(doc.get("announcedAt")) or kma_text.parse_iso(doc.get("occurredAt")),
         "max_level": int(level) if level else parse_level(doc.get("maxIntensity")),
@@ -309,7 +326,7 @@ def _city_lines(cities, origin, now, limit=8):
             status = "도달 · 已抵達"
         else:
             arrive = int(origin.timestamp() + city["seconds"])
-            status = f"<t:{arrive}:R> · 약 {remain:.0f}초"
+            status = f"<t:{arrive}:R>"
         lines.append(f"{LEVEL_EMOJI.get(city['level'], '▫️')} **{city['ko']}** {city['zh']}　{roman(city['level'])}　{status}")
     return lines
 
@@ -330,7 +347,7 @@ def build_message(event, mode_key, filename, analysis):
     mag = event.get("magnitude")
     depth = event.get("depth")
     mag_text = f"M{mag:.1f}" if mag is not None else "-"
-    depth_text = f"{depth:.0f}km" if depth is not None else "-"
+    depth_text = f"{depth:.0f}km" if depth and mode_key == "지진정보" else "-"
     level_ko = "최대진도" if mode_key == "지진정보" else "최대 예상진도"
     level_zh = "最大震度" if mode_key == "지진정보" else "最大預估震度"
     desc = []
@@ -349,7 +366,7 @@ def build_message(event, mode_key, filename, analysis):
         desc.append(f"🎯 최대진도 지역 **{' · '.join(event['max_area'])}**")
 
     embed = discord.Embed(
-        title=f"📍 {event.get('place_ko') or '-'}",
+        title=f"📍 {kma_text.s2t(event.get('place_ko')) or '-'}",
         description="\n".join(desc),
         color=EMBED_COLORS.get(level, 0x8A9099),
     )

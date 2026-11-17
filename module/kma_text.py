@@ -1,4 +1,9 @@
+import json
+import os
 from datetime import datetime, timedelta, timezone
+
+PLACE_TABLE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "maps", "korea_place_zh.json")
+_PLACES = None
 
 UTC8 = timezone(timedelta(hours=8))
 KST = timezone(timedelta(hours=9))
@@ -65,13 +70,35 @@ def kst_text(dt, with_seconds=True):
     return dt.astimezone(KST).strftime(fmt)
 
 
+def _place_table():
+    if _PLACES is None:
+        try:
+            with open(PLACE_TABLE_PATH, encoding="utf-8") as f:
+                globals()["_PLACES"] = json.load(f)
+        except Exception:
+            globals()["_PLACES"] = {}
+    return _PLACES
+
+
+def _local_place_zh(place_ko):
+    parts = (place_ko or "").split()
+    if not parts or parts[0] not in _SIDO_ZH:
+        return "", False
+    table = _place_table()
+    zh = _SIDO_ZH[parts[0]]
+    city = table.get(f"{parts[0]}|{parts[1]}") if len(parts) > 1 else None
+    if not city:
+        return zh, False
+    zh += city
+    district = table.get(f"{parts[1]}|{parts[2]}") if len(parts) > 2 else None
+    return zh + (district or ""), True
+
+
 def place_zh(place_ko, place_zh_raw=None):
-    if place_zh_raw:
-        return s2t(place_zh_raw)
-    if not place_ko:
-        return ""
-    head = place_ko.split()[0]
-    return _SIDO_ZH.get(head, "")
+    local, detailed = _local_place_zh(place_ko)
+    if detailed or not place_zh_raw:
+        return local
+    return s2t(place_zh_raw)
 
 
 def direction_zh(place_ko):
