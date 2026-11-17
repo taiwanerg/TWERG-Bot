@@ -267,7 +267,7 @@ def _draw_info(c, event, mode_key, analysis):
     shaking = sum(1 for v in analysis["levels"].values() if v >= 2)
     cells = [
         ("발생 시각", kma_text.kst_text(origin)[5:] + " KST" if origin else "-"),
-        ("깊이", f"{depth:.0f} km" if mode_key == "지진정보" and isinstance(depth, (int, float)) and depth > 0 else "-"),
+        ("깊이", f"{depth:.0f} km" if isinstance(depth, (int, float)) and depth > 0 else "-"),
         ("진도 Ⅱ 이상 시군구", f"{shaking}곳" if analysis["source"] != "none" else "-"),
         fourth,
     ]
